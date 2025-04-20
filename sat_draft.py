@@ -38,6 +38,7 @@ from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 
 from nltk.translate.bleu_score import corpus_bleu
+nltk.download('punkt_tab')
 
 try:
     import optuna  # Optional hyperparameter optimization
@@ -130,7 +131,7 @@ def doubly_stochastic_regularization(attn_weights, lambda_reg=1.0):
     """
     # Stack into shape (T, B, L)
     attn_tensor = torch.stack(attn_weights, dim=0)  # (T, B, L)
-    attn_sum = attn_tensor.sum(dim=0)               # (B, L)
+    attn_sum = attn_tensor.sum(dim=0)               # sum over times (B, L)
     reg = ((1.0 - attn_sum) ** 2).mean()            # average over batch and locations
     return lambda_reg * reg
 
@@ -290,30 +291,51 @@ class Flickr8kDataset(Dataset):
         self.img_folder = img_folder
         self.transform = transform
         self.vocab = vocab
-        
+
+        self.image_names = []
+        self.texts = []
+        skipped = 0
+
         # Parse captions file
         with open(captions_file, 'r') as f:
-            self.captions = [line.strip().split('\t') for line in f.readlines()]
-        
-        self.image_names = [cap[0].split('#')[0] for cap in self.captions]
-        self.texts = [cap[1] for cap in self.captions]
-        
+            for line in f.readlines():
+                # Assuming format: image_name#id,caption
+                parts = line.strip().split(',', 1)  # Split on first comma only
+                if len(parts) == 2:
+                    img_file = parts[0].split('#')[0]
+                    img_path = os.path.join(self.img_folder, img_file)
+                    if os.path.exists(img_path):
+                        self.image_names.append(img_file)
+                        self.texts.append(parts[1])
+                    else:
+                        skipped += 1
+                        print(f"[Skipped] Missing image file: {img_path}")
+
+        if skipped:
+            print(f"[Info] Skipped {skipped} captions with missing images.")
+
         # Build vocabulary if not provided
         if vocab is None:
             self.vocab = Vocabulary().build_vocab(self.texts)
-            
-        # Group captions by length (as described in the paper)
+        else:
+            self.vocab = vocab
+
+        # Group captions by length
         self.length_to_indices = defaultdict(list)
         for idx, text in enumerate(self.texts):
             caption = self.vocab.numericalize(text)
             caption_length = len(caption) + 2  # +2 for <START> and <END>
             self.length_to_indices[caption_length].append(idx)
-            
+
         # Store available lengths for length-based sampling
         self.available_lengths = sorted(list(self.length_to_indices.keys()))
 
+        # Check if we have any valid captions
+        if not self.available_lengths:
+            raise ValueError("No valid captions found in dataset")
+
     def __len__(self):
-        return len(self.captions)
+        return len(self.texts)  # Fix: should return the length of texts (captions)
 
     def __getitem__(self, idx):
         img_name = os.path.join(self.img_folder, self.image_names[idx])
@@ -373,17 +395,66 @@ class LengthBasedBatchSampler:
         self.shuffle = shuffle
         self.drop_last = drop_last
         
+        # Handle both Dataset and Subset objects
+        if hasattr(dataset, 'length_to_indices'):
+            # Original dataset
+            self.length_to_indices = dataset.length_to_indices
+        elif hasattr(dataset, 'dataset') and hasattr(dataset.dataset, 'length_to_indices'):
+            # Subset object - rebuild length_to_indices using only the indices in the subset
+            self.length_to_indices = defaultdict(list)
+            original_dataset = dataset.dataset
+            subset_indices = dataset.indices
+            
+            # Map subset indices to original indices
+            for i, idx in enumerate(subset_indices):
+                # Get the caption length from the original dataset
+                text = original_dataset.texts[idx]
+                caption = original_dataset.vocab.numericalize(text)
+                caption_length = len(caption) + 2  # +2 for <START> and <END>
+                # Store the subset index (i) in our new length_to_indices
+                self.length_to_indices[caption_length].append(i)
+        else:
+            raise TypeError("Dataset must have length_to_indices attribute or be a Subset of such a dataset")
+        
+        # Store available lengths for length-based sampling
+        self.available_lengths = sorted(list(self.length_to_indices.keys()))
+        
+        # Pre-calculate total batches
+        self.total_batches = self._calculate_total_batches()
+        
+    def _calculate_total_batches(self):
+        total = 0
+        for indices in self.length_to_indices.values():
+            if self.drop_last:
+                total += len(indices) // self.batch_size
+            else:
+                total += (len(indices) + self.batch_size - 1) // self.batch_size
+        return total
+        
     def __iter__(self):
-        for _ in range(len(self)):
-            yield self.dataset.get_length_based_batch_indices(self.batch_size)
+        lengths = self.available_lengths
+        all_batches = []
+
+        for _ in range(self.total_batches):
+            # Randomly sample a length
+            length = random.choice(lengths)
+            indices = self.length_to_indices[length]
+            
+            # Sample a batch of that length
+            batch = random.sample(indices, self.batch_size) if len(indices) >= self.batch_size else \
+                    random.choices(indices, k=self.batch_size)
+
+            all_batches.append(batch)
+
+        # Shuffle final batch order
+        if self.shuffle:
+            random.shuffle(all_batches)
+
+        for batch in all_batches:
+            yield batch
             
     def __len__(self):
-        # Determine how many batches we'll create
-        if self.drop_last:
-            return sum(len(indices) // self.batch_size for indices in self.dataset.length_to_indices.values())
-        else:
-            return sum((len(indices) + self.batch_size - 1) // self.batch_size 
-                      for indices in self.dataset.length_to_indices.values())
+        return self.total_batches
 
 ################################################################################
 # Training & Evaluation Functions
@@ -413,10 +484,10 @@ def train_and_evaluate(
     save_dir: str | pathlib.Path = "checkpoints"
 ):
     model.to(cfg.device)
-    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=cfg.lr)
+    optimizer = torch.optim.RMSprop(filter(lambda p: p.requires_grad, model.parameters()), lr=cfg.lr)  # RMSprop for flickr8k
     save_dir = pathlib.Path(save_dir)
     save_dir.mkdir(exist_ok=True)
-    
+
     # Create dataloaders based on configuration
     if cfg.length_based_sampling:
         # Length-based sampling as described in the paper
@@ -424,7 +495,9 @@ def train_and_evaluate(
         train_loader = DataLoader(
             train_dataset, 
             batch_sampler=train_sampler, 
-            collate_fn=collate_fn
+            collate_fn=collate_fn,
+            num_workers=4,  # Adjust based on your CPU
+            pin_memory=True  # Speeds up host to GPU transfers
         )
     else:
         # Traditional random sampling
@@ -434,7 +507,7 @@ def train_and_evaluate(
             shuffle=True, 
             collate_fn=collate_fn
         )
-    
+
     # Validation loader (always random sampling for evaluation)
     val_loader = DataLoader(
         val_dataset, 
@@ -442,29 +515,29 @@ def train_and_evaluate(
         shuffle=False, 
         collate_fn=collate_fn
     )
-    
+
     # Keep track of best BLEU score and patience counter
     best_bleu = 0.0
     patience_counter = 0
     best_model_path = save_dir / "best_model.pt"
-    
+
     # Training loop
     for epoch in range(1, cfg.epochs + 1):
         start_time = time.time()
-        
+
         # Training phase
         model.train()
         running_loss = 0.0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{cfg.epochs}")
-        
+
         for images, captions, lengths in pbar:
             images = images.to(cfg.device)
             captions = captions.to(cfg.device)
-            
+
             # Forward pass
             scores, alphas = model(images, captions, lengths)
             targets = pack_padded_sequence(captions[:, 1:], [l - 1 for l in lengths], batch_first=True, enforce_sorted=False).data
-            
+
             # Calculate loss components
             ce_loss = criterion(scores, targets)
             reg_loss = doubly_stochastic_regularization(
@@ -472,58 +545,59 @@ def train_and_evaluate(
                 lambda_reg=cfg.lambda_reg
             )
             total_loss = ce_loss + reg_loss
-            
+
             # Backward pass and optimization
             optimizer.zero_grad()
             total_loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
             optimizer.step()
-            
+
             # Update tracking
             running_loss += total_loss.item()
             pbar.set_postfix({"loss": total_loss.item(), "ce": ce_loss.item(), "reg": reg_loss.item()})
-            
+
         train_loss = running_loss / len(train_loader)
-        
+
         # Evaluation phase
-        current_bleu = evaluate_bleu(model, val_loader, cfg.device, val_dataset.vocab)
+        current_bleu1, current_bleu2, current_bleu3, current_bleu4 = evaluate_bleu(model, val_loader, cfg.device, val_dataset.dataset.vocab)
         epoch_time = time.time() - start_time
-        
+
         print(f"Epoch {epoch:02d}/{cfg.epochs} – Train Loss: {train_loss:.4f}, "
-              f"BLEU-4: {current_bleu:.4f}, Time: {epoch_time:.1f}s")
-        
+              f"BLEU-1: {current_bleu1:.4f}, BLEU-2: {current_bleu2:.4f}, BLEU-3: {current_bleu3:.4f}, BLEU-4: {current_bleu4:.4f}, Time: {epoch_time:.1f}s")
+
         # Save checkpoint if requested
         if epoch % cfg.save_every == 0:
             torch.save(model.state_dict(), save_dir / f"sat_epoch{epoch}.pt")
-            
+
         # Check if this is the best model so far
-        if current_bleu > best_bleu:
-            best_bleu = current_bleu
+        if current_bleu4 > best_bleu:
+            best_bleu = current_bleu4
             patience_counter = 0
             torch.save(model.state_dict(), best_model_path)
-            print(f"New best BLEU score: {best_bleu:.4f} - Saving model")
+            print(f"New best BLEU-4 score: {best_bleu:.4f} - Saving model")
         else:
             patience_counter += 1
-            print(f"No improvement in BLEU score for {patience_counter} epochs")
-            
+            print(f"No improvement in BLEU-4 score for {patience_counter} epochs")
+
         # Early stopping based on BLEU score
         if cfg.early_stopping and patience_counter >= cfg.patience:
             print(f"Early stopping after {epoch} epochs without BLEU improvement")
             break
-    
+
     # Load the best model for final evaluation
     model.load_state_dict(torch.load(best_model_path))
-    final_bleu = evaluate_bleu(model, val_loader, cfg.device, val_dataset.vocab)
-    print(f"Training completed. Best BLEU-4 score: {final_bleu:.4f}")
-    
-    return model, final_bleu
+    final_bleu1, final_bleu2, final_bleu3, final_bleu4 = evaluate_bleu(model, val_loader, cfg.device, val_dataset.vocab)
+    print(f"Training completed. Best BLEU-4 score: {final_bleu4:.4f}, BLEU-1: {final_bleu1:.4f}, BLEU-2: {final_bleu2:.4f}, BLEU-3: {final_bleu3:.4f}")
+
+    return model, final_bleu4
+
 
 def evaluate_bleu(model, loader, device, vocab):
-    """Evaluate model using BLEU score."""
+    """Evaluate model using BLEU scores (1-4)."""
     model.eval()
     references = []
     hypotheses = []
-    
+
     with torch.no_grad():
         for images, captions, lengths in tqdm(loader, desc="Evaluating"):
             images = images.to(device)
@@ -534,25 +608,29 @@ def evaluate_bleu(model, loader, device, vocab):
                 start_idx=vocab.word2idx["<START>"], 
                 end_idx=vocab.word2idx["<END>"]
             )
-            
+
             # Process each sample in batch
             for i, pred in enumerate(sampled):
                 # Remove special tokens
                 pred_tokens = [vocab.idx2word[idx] for idx in pred 
                               if idx not in {0, 1, 2}]  # Exclude PAD, START, END
-                
+
                 # Get reference from gold captions
                 ref_tokens = []
                 for idx in captions[i].cpu().numpy():
                     if idx not in {0, 1, 2}:  # Exclude PAD, START, END
                         ref_tokens.append(vocab.idx2word[idx])
-                
+
                 hypotheses.append(pred_tokens)
                 references.append([ref_tokens])  # Nested list for corpus_bleu
-    
-    # Calculate BLEU-4 score
+
+    # Calculate BLEU scores
+    bleu1 = corpus_bleu(references, hypotheses, weights=(1.0, 0, 0, 0))
+    bleu2 = corpus_bleu(references, hypotheses, weights=(0.5, 0.5, 0, 0))
+    bleu3 = corpus_bleu(references, hypotheses, weights=(0.33, 0.33, 0.33, 0))
     bleu4 = corpus_bleu(references, hypotheses, weights=(0.25, 0.25, 0.25, 0.25))
-    return bleu4
+
+    return bleu1, bleu2, bleu3, bleu4
 
 ################################################################################
 # Hyperparameter Optimization with Optuna (optional)
@@ -656,7 +734,9 @@ if __name__ == "__main__":
         nltk.download('punkt')
     
     # Set up device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else 
+                      "mps" if torch.backends.mps.is_available() else 
+                      "cpu")
     print(f"Using device: {device}")
     
     # Define transformations
@@ -701,8 +781,6 @@ if __name__ == "__main__":
     run_hpo = False  # Set to True if you want to run hyperparameter optimization
     best_params = {}
     
-# Continuing from where the code left off...
-
     if run_hpo and OPTUNA_AVAILABLE:
         print("Running hyperparameter optimization...")
         best_params = optimize_hyperparameters(img_folder, captions_file, n_trials=20)
@@ -742,7 +820,7 @@ if __name__ == "__main__":
     
     # Train the model
     print("Starting training...")
-    model, val_bleu = train_and_evaluate(
+    model, val_bleu1, val_bleu2, val_bleu3, val_bleu4 = train_and_evaluate(
         model, 
         train_dataset, 
         val_dataset, 
@@ -752,6 +830,12 @@ if __name__ == "__main__":
         save_dir="checkpoints"
     )
     
+    # Print all BLEU scores after training
+    print(f"Validation BLEU-1: {val_bleu1:.4f}")
+    print(f"Validation BLEU-2: {val_bleu2:.4f}")
+    print(f"Validation BLEU-3: {val_bleu3:.4f}")
+    print(f"Validation BLEU-4: {val_bleu4:.4f}")
+    
     # Final evaluation on test set
     print("Evaluating on test set...")
     test_loader = DataLoader(
@@ -760,8 +844,13 @@ if __name__ == "__main__":
         shuffle=False, 
         collate_fn=collate_fn
     )
-    test_bleu = evaluate_bleu(model, test_loader, config.device, vocab)
-    print(f"Test BLEU-4 score: {test_bleu:.4f}")
+    test_bleu1, test_bleu2, test_bleu3, test_bleu4 = evaluate_bleu(model, test_loader, config.device, vocab)
+    
+    # Print BLEU scores for test set
+    print(f"Test BLEU-1 score: {test_bleu1:.4f}")
+    print(f"Test BLEU-2 score: {test_bleu2:.4f}")
+    print(f"Test BLEU-3 score: {test_bleu3:.4f}")
+    print(f"Test BLEU-4 score: {test_bleu4:.4f}")
     
     # Generate and save some sample captions
     def generate_sample_captions(model, dataset, device, num_samples=5):
@@ -826,8 +915,13 @@ def visualize_attention(image_path, caption, attention_maps, vocab, save_path=No
     import matplotlib.pyplot as plt
     from matplotlib.pyplot import cm
     import numpy as np
-    
-    # Load and display the image
+
+    if not os.path.exists(image_path):
+        print(f"[Warning] Missing image file: {image_path}. Skipping.")
+        return
+
+    image = Image.open(img_name).convert("RGB")
+
     img = Image.open(image_path).convert('RGB')
     plt.figure(figsize=(14, 14))
     
