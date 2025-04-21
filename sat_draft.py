@@ -40,11 +40,8 @@ import torchvision.transforms as transforms
 from nltk.translate.bleu_score import corpus_bleu
 nltk.download('punkt_tab')
 
-try:
-    import optuna  # Optional hyperparameter optimization
-    OPTUNA_AVAILABLE = True
-except ImportError:
-    OPTUNA_AVAILABLE = False
+import types
+import shutil
 
 ################################################################################
 # Encoder – fixed CNN backbone (VGG‑16 conv4_3 by default) that outputs a grid
@@ -245,6 +242,7 @@ class ShowAttendTell(nn.Module):
             dropout=kwargs.get("dropout", 0.3),
             use_double_attention=kwargs.get("use_double_attention", True)
         )
+        self.decoder.beam_search = types.MethodType(beam_search, self.decoder)
 
     def forward(self, images: torch.Tensor, captions: torch.Tensor, lengths: List[int]):
         a = self.encoder(images)
@@ -457,6 +455,82 @@ class LengthBasedBatchSampler:
         return self.total_batches
 
 ################################################################################
+# Beam Search
+################################################################################
+
+# Define the BeamNode class for tracking partial sequences
+class BeamNode:
+    def __init__(self, prev_node, word_id, logprob, length, hidden_state, cell_state, alpha):
+        self.prev_node = prev_node  # Previous node in the beam
+        self.word_id = word_id      # Current word index
+        self.logprob = logprob      # Cumulative log-probability
+        self.length = length        # Current length of the sequence
+        self.hidden_state = hidden_state  # LSTM hidden state
+        self.cell_state = cell_state      # LSTM cell state
+        self.alpha = alpha  # Attention map at this step
+
+    def sequence(self):
+        seq = []
+        node = self
+        while node.prev_node is not None:
+            seq.append(node.word_id)
+            node = node.prev_node
+        return seq[::-1]  # reverse
+
+    def score(self):
+        return self.logprob / self.length  # length normalization (Xu et al.)
+
+# Add beam_search method to DecoderRNN
+@torch.no_grad()
+def beam_search(self, a, beam_size, max_len, start_idx, end_idx):
+    B = a.size(0)
+    assert B == 1, "Beam search currently supports batch size 1 only"
+
+    device = a.device
+    h, c = self.init_hidden_state(a)
+    inputs = torch.full((1,), start_idx, dtype=torch.long, device=device)
+
+    root = BeamNode(prev_node=None, word_id=start_idx, logprob=0.0, length=1,
+                    hidden_state=h, cell_state=c, alpha=None)
+    nodes = [root]
+    end_nodes = []
+
+    for _ in range(max_len):
+        next_nodes = []
+        for node in nodes:
+            if node.word_id == end_idx:
+                end_nodes.append(node)
+                continue
+            h, c = node.hidden_state, node.cell_state
+            context_input = h if self.use_double_attention else None
+            context, alpha, _ = self.attention(a, h, context_input)
+            emb = self.embed(torch.tensor([node.word_id], device=device))
+            h, c = self.lstm(torch.cat([emb, context], dim=1), (h, c))
+            scores = F.log_softmax(self.fc(h), dim=-1)
+            logprobs, top_ids = scores.topk(beam_size)
+
+            for i in range(beam_size):
+                next_node = BeamNode(prev_node=node,
+                                     word_id=top_ids[0][i].item(),
+                                     logprob=node.logprob + logprobs[0][i].item(),
+                                     length=node.length + 1,
+                                     hidden_state=h,
+                                     cell_state=c,
+                                     alpha=alpha)
+                next_nodes.append(next_node)
+
+        nodes = sorted(next_nodes, key=lambda n: n.score(), reverse=True)[:beam_size]
+
+        if len(end_nodes) >= beam_size:
+            break
+
+    if len(end_nodes) == 0:
+        end_nodes = nodes
+
+    best_node = sorted(end_nodes, key=lambda n: n.score(), reverse=True)[0]
+    return best_node.sequence(), best_node
+
+################################################################################
 # Training & Evaluation Functions
 ################################################################################
 
@@ -559,7 +633,7 @@ def train_and_evaluate(
         train_loss = running_loss / len(train_loader)
 
         # Evaluation phase
-        current_bleu1, current_bleu2, current_bleu3, current_bleu4 = evaluate_bleu(model, val_loader, cfg.device, val_dataset.dataset.vocab)
+        current_bleu1, current_bleu2, current_bleu3, current_bleu4 = evaluate_bleu_with_beam(model, val_loader, cfg.device, val_dataset.dataset.vocab)
         epoch_time = time.time() - start_time
 
         print(f"Epoch {epoch:02d}/{cfg.epochs} – Train Loss: {train_loss:.4f}, "
@@ -586,45 +660,45 @@ def train_and_evaluate(
 
     # Load the best model for final evaluation
     model.load_state_dict(torch.load(best_model_path))
-    final_bleu1, final_bleu2, final_bleu3, final_bleu4 = evaluate_bleu(model, val_loader, cfg.device, val_dataset.vocab)
+    final_bleu1, final_bleu2, final_bleu3, final_bleu4 = evaluate_bleu_with_beam(model, val_loader, cfg.device, val_dataset.vocab)
     print(f"Training completed. Best BLEU-4 score: {final_bleu4:.4f}, BLEU-1: {final_bleu1:.4f}, BLEU-2: {final_bleu2:.4f}, BLEU-3: {final_bleu3:.4f}")
 
-    return model, final_bleu4
+    return model, final_bleu1, final_bleu2, final_bleu3, final_bleu4
 
 
-def evaluate_bleu(model, loader, device, vocab):
-    """Evaluate model using BLEU scores (1-4)."""
+# Updated BLEU evaluation with beam search
+@torch.no_grad()
+def evaluate_bleu_with_beam(model, loader, device, vocab, beam_size=5, max_len=20):
     model.eval()
     references = []
     hypotheses = []
 
-    with torch.no_grad():
-        for images, captions, lengths in tqdm(loader, desc="Evaluating"):
-            images = images.to(device)
-            a = model.encoder(images)
-            sampled, _ = model.decoder.sample(
-                a, 
-                max_len=20, 
-                start_idx=vocab.word2idx["<START>"], 
+    for images, captions, lengths in tqdm(loader, desc="Evaluating with Beam Search"):
+        images = images.to(device)
+        batch_size = images.size(0)
+        a = model.encoder(images)
+
+        for i in range(batch_size):
+            features = a[i:i+1]
+            sampled_ids, _ = model.decoder.beam_search(
+                features,
+                beam_size=beam_size,
+                max_len=max_len,
+                start_idx=vocab.word2idx["<START>"],
                 end_idx=vocab.word2idx["<END>"]
             )
 
-            # Process each sample in batch
-            for i, pred in enumerate(sampled):
-                # Remove special tokens
-                pred_tokens = [vocab.idx2word[idx] for idx in pred 
-                              if idx not in {0, 1, 2}]  # Exclude PAD, START, END
+            # Filter special tokens from prediction
+            pred_tokens = [vocab.idx2word[idx] for idx in sampled_ids 
+                           if idx not in {vocab.word2idx["<PAD>"], vocab.word2idx["<START>"], vocab.word2idx["<END>"]}]
 
-                # Get reference from gold captions
-                ref_tokens = []
-                for idx in captions[i].cpu().numpy():
-                    if idx not in {0, 1, 2}:  # Exclude PAD, START, END
-                        ref_tokens.append(vocab.idx2word[idx])
+            # Filter special tokens from reference
+            ref_tokens = [vocab.idx2word[idx.item()] for idx in captions[i] 
+                          if idx.item() not in {vocab.word2idx["<PAD>"], vocab.word2idx["<START>"], vocab.word2idx["<END>"]}]
 
-                hypotheses.append(pred_tokens)
-                references.append([ref_tokens])  # Nested list for corpus_bleu
+            hypotheses.append(pred_tokens)
+            references.append([ref_tokens])
 
-    # Calculate BLEU scores
     bleu1 = corpus_bleu(references, hypotheses, weights=(1.0, 0, 0, 0))
     bleu2 = corpus_bleu(references, hypotheses, weights=(0.5, 0.5, 0, 0))
     bleu3 = corpus_bleu(references, hypotheses, weights=(0.33, 0.33, 0.33, 0))
@@ -632,95 +706,17 @@ def evaluate_bleu(model, loader, device, vocab):
 
     return bleu1, bleu2, bleu3, bleu4
 
-################################################################################
-# Hyperparameter Optimization with Optuna (optional)
-################################################################################
-
-def optimize_hyperparameters(img_folder, captions_file, n_trials=50):
-    """
-    Use Optuna to find optimal hyperparameters, similar to Whetlab mentioned in the paper.
-    """
-    if not OPTUNA_AVAILABLE:
-        print("Optuna not available. Skipping hyperparameter optimization.")
-        return None
-    
-    def objective(trial):
-        # Hyperparameters to optimize
-        params = {
-            'embed_dim': trial.suggest_int('embed_dim', 128, 512, step=64),
-            'hidden_dim': trial.suggest_int('hidden_dim', 256, 1024, step=128),
-            'attn_dim': trial.suggest_int('attn_dim', 256, 1024, step=128),
-            'dropout': trial.suggest_float('dropout', 0.1, 0.5, step=0.1),
-            'lambda_reg': trial.suggest_float('lambda_reg', 0.5, 5.0, step=0.5),
-            'lr': trial.suggest_float('lr', 1e-5, 1e-3, log=True),
-            'use_double_attention': trial.suggest_categorical('use_double_attention', [True, False]),
-            'finetune': trial.suggest_categorical('finetune', [True, False]),
-        }
-        
-        # Set up dataset
-        transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-        
-        dataset = Flickr8kDataset(
-            img_folder=img_folder,
-            captions_file=captions_file,
-            transform=transform
-        )
-        
-        # Split into train/val sets
-        train_size = int(0.8 * len(dataset))
-        val_size = len(dataset) - train_size
-        train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
-        train_dataset.dataset = dataset
-        val_dataset.dataset = dataset
-        
-        # Set up model and training config
-        model = ShowAttendTell(
-            vocab_size=len(dataset.vocab),
-            backbone="vgg19",
-            **params
-        )
-        
-        cfg = TrainingConfig(
-            epochs=10,  # Limited epochs for HPO
-            batch_size=64,
-            lr=params['lr'],
-            grad_clip=5.0,
-            lambda_reg=params['lambda_reg'],
-            patience=3,  # Lower patience for HPO
-            length_based_sampling=True,
-            early_stopping=True
-        )
-        
-        criterion = nn.CrossEntropyLoss(ignore_index=0)
-        
-        # Train with limited epochs for HPO
-        _, bleu_score = train_and_evaluate(
-            model, 
-            train_dataset, 
-            val_dataset, 
-            criterion, 
-            cfg, 
-            len(dataset.vocab), 
-            save_dir="checkpoints_hpo"
-        )
-        
-        return bleu_score
-    
-    # Create study and optimize
-    study = optuna.create_study(direction='maximize')
-    study.optimize(objective, n_trials=n_trials)
-    
-    print("Best trial:")
-    print(f"  Value (BLEU-4): {study.best_trial.value:.4f}")
-    print("  Params:")
-    for key, value in study.best_trial.params.items():
-        print(f"    {key}: {value}")
-        
-    return study.best_trial.params
+def zip_and_download_checkpoints(checkpoint_dir="checkpoints"):
+    if os.path.exists(checkpoint_dir):
+        shutil.make_archive("checkpoints", 'zip', checkpoint_dir)
+        try:
+            from google.colab import files
+            files.download("checkpoints.zip")
+            print("✅ Checkpoints zipped and download started.")
+        except ImportError:
+            print("⚠️ Not in a Colab environment — zip created but not downloaded.")
+    else:
+        print(f"❌ Checkpoint directory '{checkpoint_dir}' does not exist.")
 
 ################################################################################
 # Main execution
@@ -777,57 +773,61 @@ if __name__ == "__main__":
     val_dataset.dataset = dataset
     test_dataset.dataset = dataset
     
-    # Check if we should run hyperparameter optimization
-    run_hpo = False  # Set to True if you want to run hyperparameter optimization
-    best_params = {}
+    # Default parameters
+    model_params = {
+        'embed_dim': 512,
+        'hidden_dim': 512,
+        'attn_dim': 512,
+        'dropout': 0.3,
+        'lambda_reg': 1.0,
+        'lr': 3e-4,
+        'use_double_attention': True,
+        'finetune': False
+    }
     
-    if run_hpo and OPTUNA_AVAILABLE:
-        print("Running hyperparameter optimization...")
-        best_params = optimize_hyperparameters(img_folder, captions_file, n_trials=20)
-    else:
-        # Default parameters
-        best_params = {
-            'embed_dim': 256,
-            'hidden_dim': 512,
-            'attn_dim': 512,
-            'dropout': 0.3,
-            'lambda_reg': 1.0,
-            'lr': 3e-4,
-            'use_double_attention': True,
-            'finetune': False
-        }
-    
-    # Create model with best parameters
-    print("Creating model with parameters:", best_params)
+    # Create model with parameters
+    print("Creating model with parameters:", model_params)
     model = ShowAttendTell(
         vocab_size=vocab_size,
         backbone="vgg19",
-        **best_params
+        **model_params
     )
     
     # Loss function and config
     criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding
     config = TrainingConfig(
-        epochs=30,
-        batch_size=32,
-        lr=best_params['lr'],
+        epochs=50,
+        batch_size=64,
+        lr=model_params['lr'],
         grad_clip=5.0,
         save_every=5,
-        lambda_reg=best_params['lambda_reg'],
-        patience=7,
+        lambda_reg=model_params['lambda_reg'],
+        patience=10,
         length_based_sampling=True
     )
+    
+    # Path to resume training from (None for fresh training)
+    resume_path = None  # Change this to the path of your checkpoint
+    
+    # You can uncomment and modify this to specify a checkpoint path:
+    # resume_path = "checkpoints/best_checkpoint.pt"  # or any other checkpoint
+    
+    # If a command line argument is provided for the resume path
+    import sys
+    if len(sys.argv) > 1:
+        resume_path = sys.argv[1]
+        print(f"Resuming training from: {resume_path}")
     
     # Train the model
     print("Starting training...")
     model, val_bleu1, val_bleu2, val_bleu3, val_bleu4 = train_and_evaluate(
         model, 
-        train_dataset, 
-        val_dataset, 
+        train_dataset,
+        val_dataset,
         criterion, 
         config, 
         vocab_size,
-        save_dir="checkpoints"
+        resume_from=resume_path
     )
     
     # Print all BLEU scores after training
@@ -835,6 +835,8 @@ if __name__ == "__main__":
     print(f"Validation BLEU-2: {val_bleu2:.4f}")
     print(f"Validation BLEU-3: {val_bleu3:.4f}")
     print(f"Validation BLEU-4: {val_bleu4:.4f}")
+
+    zip_and_download_checkpoints("checkpoints")
     
     # Final evaluation on test set
     print("Evaluating on test set...")
@@ -844,7 +846,7 @@ if __name__ == "__main__":
         shuffle=False, 
         collate_fn=collate_fn
     )
-    test_bleu1, test_bleu2, test_bleu3, test_bleu4 = evaluate_bleu(model, test_loader, config.device, vocab)
+    test_bleu1, test_bleu2, test_bleu3, test_bleu4 = evaluate_bleu_with_beam(model, test_loader, config.device, vocab)
     
     # Print BLEU scores for test set
     print(f"Test BLEU-1 score: {test_bleu1:.4f}")
