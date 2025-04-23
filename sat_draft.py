@@ -28,6 +28,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from torchvision import models, transforms
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 import kagglehub
 import nltk
@@ -38,10 +39,14 @@ from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 
 from nltk.translate.bleu_score import corpus_bleu
+from nltk.translate.meteor_score import single_meteor_score
 nltk.download('punkt_tab')
+nltk.download('wordnet')  # Required for METEOR
 
 import types
 import shutil
+
+import json
 
 ################################################################################
 # Encoder – fixed CNN backbone (VGG‑16 conv4_3 by default) that outputs a grid
@@ -269,11 +274,12 @@ class Vocabulary:
             frequencies.update(tokens)
             
         # Second pass: add words that meet threshold
-        for word, freq in frequencies.items():
-            if freq >= self.freq_threshold:
-                self.word2idx[word] = idx
-                self.idx2word[idx] = word
-                idx += 1
+        # Sort by frequency (descending) and take the top 9996 (excluding 4 special tokens)
+        most_common = frequencies.most_common(10000 - 4)
+        for word, _ in most_common:
+            self.word2idx[word] = idx
+            self.idx2word[idx] = word
+            idx += 1
         
         return self
 
@@ -283,85 +289,6 @@ class Vocabulary:
     
     def __len__(self):
         return len(self.word2idx)
-
-class Flickr8kDataset(Dataset):
-    def __init__(self, img_folder, captions_file, vocab=None, transform=None):
-        self.img_folder = img_folder
-        self.transform = transform
-        self.vocab = vocab
-
-        self.image_names = []
-        self.texts = []
-        skipped = 0
-
-        # Parse captions file
-        with open(captions_file, 'r') as f:
-            for line in f.readlines():
-                # Assuming format: image_name#id,caption
-                parts = line.strip().split(',', 1)  # Split on first comma only
-                if len(parts) == 2:
-                    img_file = parts[0].split('#')[0]
-                    img_path = os.path.join(self.img_folder, img_file)
-                    if os.path.exists(img_path):
-                        self.image_names.append(img_file)
-                        self.texts.append(parts[1])
-                    else:
-                        skipped += 1
-                        print(f"[Skipped] Missing image file: {img_path}")
-
-        if skipped:
-            print(f"[Info] Skipped {skipped} captions with missing images.")
-
-        # Build vocabulary if not provided
-        if vocab is None:
-            self.vocab = Vocabulary().build_vocab(self.texts)
-        else:
-            self.vocab = vocab
-
-        # Group captions by length
-        self.length_to_indices = defaultdict(list)
-        for idx, text in enumerate(self.texts):
-            caption = self.vocab.numericalize(text)
-            caption_length = len(caption) + 2  # +2 for <START> and <END>
-            self.length_to_indices[caption_length].append(idx)
-
-        # Store available lengths for length-based sampling
-        self.available_lengths = sorted(list(self.length_to_indices.keys()))
-
-        # Check if we have any valid captions
-        if not self.available_lengths:
-            raise ValueError("No valid captions found in dataset")
-
-    def __len__(self):
-        return len(self.texts)  # Fix: should return the length of texts (captions)
-
-    def __getitem__(self, idx):
-        img_name = os.path.join(self.img_folder, self.image_names[idx])
-        image = Image.open(img_name).convert("RGB")
-        
-        if self.transform:
-            image = self.transform(image)
-            
-        # Tokenize caption
-        caption = [self.vocab.word2idx["<START>"]] + self.vocab.numericalize(self.texts[idx]) + [self.vocab.word2idx["<END>"]]
-        length = len(caption)
-        caption = torch.tensor(caption)
-        
-        return image, caption, length
-    
-    def get_length_based_batch_indices(self, batch_size):
-        """Get indices for a batch of samples with the same caption length."""
-        # Randomly choose a caption length
-        length = random.choice(self.available_lengths)
-        indices = self.length_to_indices[length]
-        
-        # If we don't have enough samples of this length, sample with replacement
-        if len(indices) < batch_size:
-            sampled_indices = random.choices(indices, k=batch_size)
-        else:
-            sampled_indices = random.sample(indices, batch_size)
-            
-        return sampled_indices
 
 def collate_fn(batch):
     """Custom collate function for padding sequences in a batch."""
@@ -377,6 +304,109 @@ def collate_fn(batch):
     padded_captions = torch.nn.utils.rnn.pad_sequence(captions, batch_first=True, padding_value=0)
     
     return images, padded_captions, lengths.tolist()
+
+class Flickr8kDataset(Dataset):
+    def __init__(self, img_folder, captions_file, vocab=None, transform=None):
+        self.img_folder = img_folder
+        self.transform = transform
+        self.vocab = vocab
+
+        self.captions = defaultdict(list)  # <-- NEW
+        self.image_names = []
+        self.texts = []
+        skipped = 0
+
+        with open(captions_file, 'r') as f:
+            for line in f:
+                parts = line.strip().split('\t')
+                if len(parts) == 2:
+                    img_file = parts[0].split('#')[0].strip()
+                    caption = parts[1].strip()
+                    img_path = os.path.join(self.img_folder, img_file)
+                    if os.path.exists(img_path):
+                        self.image_names.append(img_file)
+                        self.texts.append(caption)
+                        self.captions[img_file].append(caption)  # <-- store in dict
+                    else:
+                        skipped += 1
+
+
+        if skipped:
+            print(f"[Info] Skipped {skipped} captions with missing images.")
+
+        # Build vocabulary if not provided
+        if vocab is None:
+            self.vocab = Vocabulary().build_vocab(self.texts)
+        else:
+            self.vocab = vocab
+
+        # Group captions by length for length-based batching
+        self.length_to_indices = defaultdict(list)
+        for idx, text in enumerate(self.texts):
+            caption = self.vocab.numericalize(text)
+            caption_length = len(caption) + 2  # +2 for <START> and <END>
+            self.length_to_indices[caption_length].append(idx)
+
+        self.available_lengths = sorted(self.length_to_indices.keys())
+
+        if not self.available_lengths:
+            raise ValueError("No valid captions found in dataset")
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        img_path = os.path.join(self.img_folder, self.image_names[idx])
+        image = Image.open(img_path).convert("RGB")
+        if self.transform:
+            image = self.transform(image)
+
+        caption = [self.vocab.word2idx["<START>"]] + \
+                  self.vocab.numericalize(self.texts[idx]) + \
+                  [self.vocab.word2idx["<END>"]]
+        caption = torch.tensor(caption)
+        length = len(caption)
+
+        return image, caption, length
+
+    def get_length_based_batch_indices(self, batch_size):
+        length = random.choice(self.available_lengths)
+        indices = self.length_to_indices[length]
+        if len(indices) < batch_size:
+            return random.choices(indices, k=batch_size)
+        else:
+            return random.sample(indices, batch_size)
+
+def get_flickr8k_splits(data_dir, transform):
+    img_folder = os.path.join(data_dir, "Flickr8k_Dataset", "Flicker8k_Dataset")
+    captions_file = os.path.join(data_dir, "Flickr8k.token.txt")
+
+    dataset = Flickr8kDataset(img_folder=img_folder, captions_file=captions_file, transform=transform)
+    vocab = dataset.vocab
+
+    # Load split files
+    def load_split(file_name):
+        path = os.path.join(data_dir, file_name)
+        with open(path, 'r') as f:
+            return set(line.strip() for line in f)
+
+    train_images = load_split('Flickr_8k.trainImages.txt')
+    val_images = load_split('Flickr_8k.devImages.txt')
+    test_images = load_split('Flickr_8k.testImages.txt')
+
+    # Filter indices based on image_names
+    train_indices = [i for i, name in enumerate(dataset.image_names) if name in train_images]
+    val_indices = [i for i, name in enumerate(dataset.image_names) if name in val_images]
+    test_indices = [i for i, name in enumerate(dataset.image_names) if name in test_images]
+
+    train_dataset = torch.utils.data.Subset(dataset, train_indices)
+    val_dataset = torch.utils.data.Subset(dataset, val_indices)
+    test_dataset = torch.utils.data.Subset(dataset, test_indices)
+
+    print(f"Vocabulary size: {len(vocab)}")
+    print(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
+
+    return train_dataset, val_dataset, test_dataset, vocab
 
 ################################################################################
 # Length-Based Batch Sampler
@@ -506,7 +536,8 @@ def beam_search(self, a, beam_size, max_len, start_idx, end_idx):
             context, alpha, _ = self.attention(a, h, context_input)
             emb = self.embed(torch.tensor([node.word_id], device=device))
             h, c = self.lstm(torch.cat([emb, context], dim=1), (h, c))
-            scores = F.log_softmax(self.fc(h), dim=-1)
+            temperature = 1.5
+            scores = F.log_softmax(self.fc(h) / temperature, dim=-1)
             logprobs, top_ids = scores.topk(beam_size)
 
             for i in range(beam_size):
@@ -547,6 +578,56 @@ class TrainingConfig:
     length_based_sampling: bool = True  # Use length-based sampling as in paper
     early_stopping: bool = True  # Use early stopping based on BLEU
 
+def save_checkpoint(model, optimizer, epoch, best_bleu, best_meteor, patience_counter, save_path, bleu_log=None):
+    """Save a complete checkpoint that can be used to resume training."""
+    checkpoint_data = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'best_bleu': best_bleu,
+        'best_meteor': best_meteor,  # Add METEOR score to checkpoint
+        'patience_counter': patience_counter
+    }
+    torch.save(checkpoint_data, save_path)
+    print(f"Checkpoint saved to {save_path}")
+
+    # Save BLEU and METEOR log if provided, to a per-checkpoint log file
+    if bleu_log is not None:
+        log_name = f"eval_scores_epoch{epoch}.json"
+        log_path = os.path.join(os.path.dirname(save_path), log_name)
+        with open(log_path, 'w') as f:
+            json.dump(bleu_log, f, indent=2)
+        print(f"Saved evaluation scores log to {log_path}")
+
+def load_checkpoint(model, optimizer, checkpoint_path, device):
+    """Load a checkpoint and return the epoch to start from and other training state."""
+    if not os.path.exists(checkpoint_path):
+        print(f"No checkpoint found at {checkpoint_path}")
+        return 1, 0.0, 0.0, 0, []
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    start_epoch = checkpoint['epoch'] + 1
+    best_bleu = checkpoint.get('best_bleu', 0.0)
+    best_meteor = checkpoint.get('best_meteor', 0.0)  # Load METEOR score
+    patience_counter = checkpoint.get('patience_counter', 0)
+
+    # Load corresponding BLEU and METEOR log if it exists
+    log_path = os.path.join(os.path.dirname(checkpoint_path), f"eval_scores_epoch{checkpoint['epoch']}.json")
+    if os.path.exists(log_path):
+        with open(log_path, 'r') as f:
+            bleu_log = json.load(f)
+        print(f"Loaded evaluation score log with {len(bleu_log)} entries from {log_path}")
+    else:
+        bleu_log = []
+
+    print(f"Loaded checkpoint from epoch {start_epoch-1}")
+    print(f"Best BLEU score so far: {best_bleu:.4f}")
+    print(f"Best METEOR score so far: {best_meteor:.4f}")
+    print(f"Patience counter: {patience_counter}")
+
+    return start_epoch, best_bleu, best_meteor, patience_counter, bleu_log
 
 def train_and_evaluate(
     model: ShowAttendTell, 
@@ -555,51 +636,55 @@ def train_and_evaluate(
     criterion, 
     cfg: TrainingConfig, 
     vocab_size: int, 
-    save_dir: str | pathlib.Path = "checkpoints"
+    save_dir: str | pathlib.Path = "checkpoints",
+    resume_from: str = None,
+    start_epoch: str = 1
 ):
     model.to(cfg.device)
-    optimizer = torch.optim.RMSprop(filter(lambda p: p.requires_grad, model.parameters()), lr=cfg.lr)  # RMSprop for flickr8k
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=cfg.lr,
+        weight_decay=1e-4  # You can experiment with 1e-5 or 5e-4 too
+    )
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode='max',
+        factor=0.8,
+        patience=3,
+        verbose=True,
+        min_lr=1e-6  # or 1e-5 for a slightly more aggressive floor
+    )
+
     save_dir = pathlib.Path(save_dir)
     save_dir.mkdir(exist_ok=True)
 
-    # Create dataloaders based on configuration
-    if cfg.length_based_sampling:
-        # Length-based sampling as described in the paper
-        train_sampler = LengthBasedBatchSampler(train_dataset, cfg.batch_size, shuffle=True)
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_sampler=train_sampler, 
-            collate_fn=collate_fn,
-            num_workers=4,  # Adjust based on your CPU
-            pin_memory=True  # Speeds up host to GPU transfers
-        )
-    else:
-        # Traditional random sampling
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_size=cfg.batch_size, 
-            shuffle=True, 
-            collate_fn=collate_fn
-        )
-
-    # Validation loader (always random sampling for evaluation)
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=cfg.batch_size, 
-        shuffle=False, 
-        collate_fn=collate_fn
-    )
-
-    # Keep track of best BLEU score and patience counter
+    # Optionally load checkpoint
     best_bleu = 0.0
+    best_meteor = 0.0  # Initialize best METEOR score
     patience_counter = 0
-    best_model_path = save_dir / "best_model.pt"
+    bleu_log = []
+    if resume_from:
+        start_epoch, best_bleu, best_meteor, patience_counter, bleu_log = load_checkpoint(model, optimizer, resume_from, cfg.device)
 
-    # Training loop
-    for epoch in range(1, cfg.epochs + 1):
+    if cfg.length_based_sampling:
+        train_sampler = LengthBasedBatchSampler(train_dataset, cfg.batch_size, shuffle=True)
+        train_loader = DataLoader(train_dataset, batch_sampler=train_sampler, collate_fn=collate_fn, num_workers=4, pin_memory=True)
+    else:
+        train_loader = DataLoader(train_dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_fn)
+
+    val_loader = DataLoader(val_dataset, batch_size=cfg.batch_size, shuffle=False, collate_fn=collate_fn)
+    best_model_path = save_dir / "best_model.pt"
+    best_model_meteor_path = save_dir / "best_model_meteor.pt"  # A separate path for best METEOR model
+
+    for epoch in range(start_epoch, cfg.epochs + 1):
         start_time = time.time()
 
-        # Training phase
+        # CNN fine-tuning warm-up logic
+        if epoch == 1 and hasattr(model.encoder, 'features'):
+            print("Unfreezing CNN layers for fine-tuning...")
+            for param in model.encoder.features[28:].parameters():  # conv5_1 and beyond in VGG19
+                param.requires_grad = True
+
         model.train()
         running_loss = 0.0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{cfg.epochs}")
@@ -608,11 +693,8 @@ def train_and_evaluate(
             images = images.to(cfg.device)
             captions = captions.to(cfg.device)
 
-            # Forward pass
             scores, alphas = model(images, captions, lengths)
             targets = pack_padded_sequence(captions[:, 1:], [l - 1 for l in lengths], batch_first=True, enforce_sorted=False).data
-
-            # Calculate loss components
             ce_loss = criterion(scores, targets)
             reg_loss = doubly_stochastic_regularization(
                 [alphas[:, t, :] for t in range(alphas.size(1))], 
@@ -620,58 +702,116 @@ def train_and_evaluate(
             )
             total_loss = ce_loss + reg_loss
 
-            # Backward pass and optimization
             optimizer.zero_grad()
             total_loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
             optimizer.step()
 
-            # Update tracking
             running_loss += total_loss.item()
             pbar.set_postfix({"loss": total_loss.item(), "ce": ce_loss.item(), "reg": reg_loss.item()})
 
         train_loss = running_loss / len(train_loader)
-
-        # Evaluation phase
-        current_bleu1, current_bleu2, current_bleu3, current_bleu4 = evaluate_bleu_with_beam(model, val_loader, cfg.device, val_dataset.dataset.vocab)
+        current_bleu1, current_bleu2, current_bleu3, current_bleu4, current_meteor = evaluate_bleu_and_meteor_with_beam(model, val_loader, cfg.device, val_dataset.dataset.vocab)
         epoch_time = time.time() - start_time
 
         print(f"Epoch {epoch:02d}/{cfg.epochs} – Train Loss: {train_loss:.4f}, "
-              f"BLEU-1: {current_bleu1:.4f}, BLEU-2: {current_bleu2:.4f}, BLEU-3: {current_bleu3:.4f}, BLEU-4: {current_bleu4:.4f}, Time: {epoch_time:.1f}s")
+              f"BLEU-1: {current_bleu1:.4f}, BLEU-2: {current_bleu2:.4f}, BLEU-3: {current_bleu3:.4f}, BLEU-4: {current_bleu4:.4f}, "
+              f"METEOR: {current_meteor:.4f}, Time: {epoch_time:.1f}s")
 
-        # Save checkpoint if requested
-        if epoch % cfg.save_every == 0:
-            torch.save(model.state_dict(), save_dir / f"sat_epoch{epoch}.pt")
+        # Update evaluation log
+        bleu_log.append({
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "bleu_1": current_bleu1,
+            "bleu_2": current_bleu2,
+            "bleu_3": current_bleu3,
+            "bleu_4": current_bleu4,
+            "meteor": current_meteor,
+            "time": epoch_time
+        })
 
-        # Check if this is the best model so far
+        # You might want to use BLEU-4 or METEOR as the scheduling metric
+        # Let's use a combination of both for scheduling
+        combined_score = (current_bleu4 + current_meteor) / 2
+        scheduler.step(combined_score)
+
+        if (epoch % cfg.save_every == 0):
+          full_ckpt_path = save_dir / f"checkpoint_epoch{epoch}.pt"
+          save_checkpoint(model, optimizer, epoch, best_bleu, best_meteor, patience_counter, full_ckpt_path, bleu_log)
+
+        # Save model if BLEU-4 improved
         if current_bleu4 > best_bleu:
             best_bleu = current_bleu4
             patience_counter = 0
-            torch.save(model.state_dict(), best_model_path)
+            save_checkpoint(model, optimizer, epoch, best_bleu, best_meteor, patience_counter, best_model_path, bleu_log)
             print(f"New best BLEU-4 score: {best_bleu:.4f} - Saving model")
-        else:
+        
+        # Save model if METEOR improved
+        if current_meteor > best_meteor:
+            best_meteor = current_meteor
+            save_checkpoint(model, optimizer, epoch, best_bleu, best_meteor, patience_counter, best_model_meteor_path, bleu_log)
+            print(f"New best METEOR score: {best_meteor:.4f} - Saving model")
+        
+        # If neither improved, increment patience counter
+        if current_bleu4 <= best_bleu and current_meteor <= best_meteor:
             patience_counter += 1
-            print(f"No improvement in BLEU-4 score for {patience_counter} epochs")
+            print(f"No improvement in scores for {patience_counter} epochs")
+            
+            # Check for early stopping based on patience
+            if cfg.early_stopping and patience_counter >= cfg.patience:
+                print(f"Early stopping after {epoch} epochs without improvement")
+                break
 
-        # Early stopping based on BLEU score
-        if cfg.early_stopping and patience_counter >= cfg.patience:
-            print(f"Early stopping after {epoch} epochs without BLEU improvement")
-            break
+    # Load the best model based on BLEU-4 for final evaluation
+    start_epoch, best_bleu, best_meteor, _, _ = load_checkpoint(model, optimizer, best_model_path, cfg.device)
+    final_bleu1, final_bleu2, final_bleu3, final_bleu4, final_meteor = evaluate_bleu_and_meteor_with_beam(model, val_loader, cfg.device, val_dataset.dataset.vocab)
+    print(f"Training completed. Best BLEU-4 score: {final_bleu4:.4f}, BLEU-1: {final_bleu1:.4f}, BLEU-2: {final_bleu2:.4f}, BLEU-3: {final_bleu3:.4f}, METEOR: {final_meteor:.4f}")
 
-    # Load the best model for final evaluation
-    model.load_state_dict(torch.load(best_model_path))
-    final_bleu1, final_bleu2, final_bleu3, final_bleu4 = evaluate_bleu_with_beam(model, val_loader, cfg.device, val_dataset.vocab)
-    print(f"Training completed. Best BLEU-4 score: {final_bleu4:.4f}, BLEU-1: {final_bleu1:.4f}, BLEU-2: {final_bleu2:.4f}, BLEU-3: {final_bleu3:.4f}")
+    return model, final_bleu1, final_bleu2, final_bleu3, final_bleu4, final_meteor
 
-    return model, final_bleu1, final_bleu2, final_bleu3, final_bleu4
+def bleu_scores_without_bp(references, hypotheses):
+    import collections
+    from nltk.util import ngrams
+    import math
 
+    max_n = 4
+    clipped_counts = [0] * max_n
+    total_counts = [0] * max_n
 
-# Updated BLEU evaluation with beam search
+    for ref_list, hyp in zip(references, hypotheses):
+        # Get n-gram counts for each n
+        hyp_ngrams = [collections.Counter(ngrams(hyp, i + 1)) for i in range(max_n)]
+        ref_ngram_counters = [[collections.Counter(ngrams(ref, i + 1)) for ref in ref_list] for i in range(max_n)]
+
+        for i in range(max_n):
+            # Get max reference counts across refs
+            ref_max = collections.Counter()
+            for ref_counts in ref_ngram_counters[i]:
+                ref_max |= ref_counts
+            overlap = hyp_ngrams[i] & ref_max
+            clipped_counts[i] += sum(overlap.values())
+            total_counts[i] += max(sum(hyp_ngrams[i].values()), 1)
+
+    # Precision per n-gram level
+    precisions = [clipped_counts[i] / total_counts[i] for i in range(max_n)]
+
+    # Compute BLEU-n scores (geometric mean of first n precisions)
+    def geo_mean(precisions, n):
+        return math.exp(sum(math.log(p + 1e-9) for p in precisions[:n]) / n)
+
+    bleu1 = precisions[0]
+    bleu2 = geo_mean(precisions, 2)
+    bleu3 = geo_mean(precisions, 3)
+    bleu4 = geo_mean(precisions, 4)
+
+    return bleu1, bleu2, bleu3, bleu4
+
 @torch.no_grad()
-def evaluate_bleu_with_beam(model, loader, device, vocab, beam_size=5, max_len=20):
+def evaluate_bleu_and_meteor_with_beam(model, loader, device, vocab, beam_size=5, max_len=20):
     model.eval()
     references = []
     hypotheses = []
+    meteor_scores = []
 
     for images, captions, lengths in tqdm(loader, desc="Evaluating with Beam Search"):
         images = images.to(device)
@@ -688,90 +828,197 @@ def evaluate_bleu_with_beam(model, loader, device, vocab, beam_size=5, max_len=2
                 end_idx=vocab.word2idx["<END>"]
             )
 
-            # Filter special tokens from prediction
             pred_tokens = [vocab.idx2word[idx] for idx in sampled_ids 
                            if idx not in {vocab.word2idx["<PAD>"], vocab.word2idx["<START>"], vocab.word2idx["<END>"]}]
-
-            # Filter special tokens from reference
-            ref_tokens = [vocab.idx2word[idx.item()] for idx in captions[i] 
-                          if idx.item() not in {vocab.word2idx["<PAD>"], vocab.word2idx["<START>"], vocab.word2idx["<END>"]}]
-
+            hypothesis = ' '.join(pred_tokens)
             hypotheses.append(pred_tokens)
-            references.append([ref_tokens])
 
-    bleu1 = corpus_bleu(references, hypotheses, weights=(1.0, 0, 0, 0))
-    bleu2 = corpus_bleu(references, hypotheses, weights=(0.5, 0.5, 0, 0))
-    bleu3 = corpus_bleu(references, hypotheses, weights=(0.33, 0.33, 0.33, 0))
-    bleu4 = corpus_bleu(references, hypotheses, weights=(0.25, 0.25, 0.25, 0.25))
+            img_idx = loader.dataset.indices[i] if hasattr(loader.dataset, "indices") else i
+            img_name = loader.dataset.dataset.image_names[img_idx]
+            ref_caps = loader.dataset.dataset.captions[img_name]
 
-    return bleu1, bleu2, bleu3, bleu4
+            ref_token_lists = []
+            ref_strings = []
+            for ref in ref_caps:
+                tokens = nltk.word_tokenize(ref.lower())
+                ref_strings.append(' '.join(tokens))
+                ref_token_lists.append(tokens)
 
-def zip_and_download_checkpoints(checkpoint_dir="checkpoints"):
-    if os.path.exists(checkpoint_dir):
-        shutil.make_archive("checkpoints", 'zip', checkpoint_dir)
-        try:
-            from google.colab import files
-            files.download("checkpoints.zip")
-            print("✅ Checkpoints zipped and download started.")
-        except ImportError:
-            print("⚠️ Not in a Colab environment — zip created but not downloaded.")
+            references.append(ref_token_lists)
+
+            # FIX: Pass tokenized hypothesis (list of tokens) rather than a string
+            # meteor = max([single_meteor_score(ref, hypothesis) for ref in ref_strings])
+            
+            # The hypothesis needs to be tokenized - we already have pred_tokens
+            hypothesis_tokens = pred_tokens  # Already a list of tokens
+            meteor = max([single_meteor_score(nltk.word_tokenize(ref), hypothesis_tokens) for ref in ref_strings])
+            meteor_scores.append(meteor)
+
+    for i in range(5):
+        print(f"\nSample {i+1}")
+        print("Hypothesis:", ' '.join(hypotheses[i]))
+        print("Reference:", [' '.join(ref) for ref in references[i]])
+        print("METEOR:", f"{meteor_scores[i]:.4f}")
+
+    bleu1, bleu2, bleu3, bleu4 = bleu_scores_without_bp(references, hypotheses)
+    meteor_avg = sum(meteor_scores) / len(meteor_scores)
+
+    return bleu1, bleu2, bleu3, bleu4, meteor_avg
+
+################################################################################
+# Visualization Utilities
+################################################################################
+
+# Generate and save some sample captions
+def generate_sample_captions(model, dataset, device, num_samples=5):
+    model.eval()
+    indices = random.sample(range(len(dataset)), num_samples)
+    
+    samples = []
+    with torch.no_grad():
+        for i, idx in enumerate(indices):
+            image, caption, _ = dataset[idx]
+            image = image.unsqueeze(0).to(device)
+            
+            # Get image features
+            features = model.encoder(image)
+            
+            # Generate caption with attention
+            pred_indices, attention_maps = model.decoder.sample(
+                features, 
+                max_len=20, 
+                start_idx=vocab.word2idx["<START>"], 
+                end_idx=vocab.word2idx["<END>"]
+            )
+            
+            # Convert to text
+            pred_text = ' '.join([vocab.idx2word[idx] for idx in pred_indices[0] 
+                                  if idx not in {0, 1, 2}])  # Exclude PAD, START, END
+                                  
+            # Get reference caption
+            ref_text = ' '.join([vocab.idx2word[idx.item()] for idx in caption 
+                                if idx.item() not in {0, 1, 2}])
+            
+            samples.append({
+                'prediction': pred_text,
+                'prediction_indices': pred_indices[0],
+                'reference': ref_text,
+                'attention_maps': attention_maps[0],
+                'dataset_idx': idx
+            })
+    
+    return samples
+
+def visualize_attention_paper_style(image_path, caption_indices, attention_maps, vocab, reference_caption=None, save_path=None):
+    """
+    Visualize attention weights in the style of the Show, Attend and Tell paper with 
+    white blobs indicating attention regions.
+    
+    Args:
+        image_path: Path to the image
+        caption_indices: List of word indices for the predicted caption
+        attention_maps: List of attention weight tensors
+        vocab: Vocabulary object for converting indices to words
+        reference_caption: String containing the reference caption
+        save_path: Path to save the visualization, if None will display instead
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.pyplot import cm
+    
+    # Open image
+    img = Image.open(image_path).convert('RGB')
+    img_np = np.array(img)
+    
+    # Filter out special tokens from caption
+    words = [vocab.idx2word[idx] for idx in caption_indices if idx not in {0, 1, 2}]
+    prediction = ' '.join(words)
+    
+    # Determine how many words to visualize (excluding <START>, <END>, <PAD>)
+    num_words = min(len(words), len(attention_maps))
+    
+    # Create a figure with num_words + 1 rows (1 for the complete caption)
+    plt.figure(figsize=(12, 2 * (num_words + 1)))
+    
+    # Plot the original image with the complete caption at the top
+    plt.subplot(num_words + 1, 1, 1)
+    plt.imshow(img_np)
+    
+    # Use the provided reference caption if available
+    if reference_caption:
+        plt.title(f"Reference: {reference_caption}\nPrediction: {prediction}", fontsize=12)
     else:
-        print(f"❌ Checkpoint directory '{checkpoint_dir}' does not exist.")
+        plt.title(f"Prediction: {prediction}", fontsize=12)
+    
+    plt.axis('off')
+    
+    # Plot each word with its attention map
+    for i in range(num_words):
+        plt.subplot(num_words + 1, 1, i + 2)
+        
+        # Reshape attention to match the feature map size (typically 14x14 for VGG)
+        att_map = attention_maps[i].cpu().reshape(14, 14)
+        att_map = att_map.detach().numpy()
+        
+        # Resize attention map to match image dimensions
+        att_map = np.array(Image.fromarray(att_map).resize(img.size, Image.BILINEAR))
+        
+        # Normalize attention map
+        att_map = att_map / np.max(att_map)
+        
+        # Create a white attention heatmap as in the original paper
+        plt.imshow(img_np)
+        plt.imshow(att_map, alpha=0.7, cmap='gray', vmin=0, vmax=1)
+        plt.title(f"'{words[i]}'", fontsize=12)
+        plt.axis('off')
+    
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path)
+        plt.close()
+    else:
+        plt.show()
 
 ################################################################################
 # Main execution
 ################################################################################
 
 if __name__ == "__main__":
-    # Make sure NLTK packages are downloaded
+    import nltk
+    from torchvision import transforms
+
+    # Ensure nltk tokenizer is downloaded
     try:
         nltk.data.find('tokenizers/punkt')
     except LookupError:
         nltk.download('punkt')
-    
-    # Set up device
+
+    # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else 
-                      "mps" if torch.backends.mps.is_available() else 
-                      "cpu")
+                          "mps" if torch.backends.mps.is_available() else 
+                          "cpu")
     print(f"Using device: {device}")
-    
-    # Define transformations
+
+    # Define transforms
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize((256, 256)),
+        transforms.RandomCrop((224, 224)),
+        transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                          std=[0.229, 0.224, 0.225])
     ])
-    
-    # Download Flickr8k dataset
+
+    # Download Flickr8k dataset from Kaggle
     print("Downloading Flickr8k dataset...")
-    data_dir = kagglehub.dataset_download("adityajn105/flickr8k")
-    img_folder = os.path.join(data_dir, "Images")
-    captions_file = os.path.join(data_dir, "captions.txt")
-    
-    # Create dataset and build vocabulary
+    data_dir = kagglehub.dataset_download("ashish2001/original-flickr8k-dataset")
+    img_folder = os.path.join(data_dir, "Flickr8k_Dataset", "Flicker8k_Dataset")
+
+    # Get splits + vocab
     print("Creating dataset and building vocabulary...")
-    dataset = Flickr8kDataset(
-        img_folder=img_folder,
-        captions_file=captions_file,
-        transform=transform
-    )
-    vocab = dataset.vocab
+    train_dataset, val_dataset, test_dataset, vocab = get_flickr8k_splits(data_dir, transform)
+
     vocab_size = len(vocab)
-    print(f"Vocabulary size: {vocab_size}")
-    
-    # Create train/val/test splits
-    train_size = int(0.7 * len(dataset))
-    val_size = int(0.15 * len(dataset))
-    test_size = len(dataset) - train_size - val_size
-    
-    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
-        dataset, [train_size, val_size, test_size]
-    )
-    
-    # Make sure all splits have the same dataset object
-    train_dataset.dataset = dataset
-    val_dataset.dataset = dataset
-    test_dataset.dataset = dataset
     
     # Default parameters
     model_params = {
@@ -779,8 +1026,8 @@ if __name__ == "__main__":
         'hidden_dim': 512,
         'attn_dim': 512,
         'dropout': 0.3,
-        'lambda_reg': 1.0,
-        'lr': 3e-4,
+        'lambda_reg': 1.4,
+        'lr': 1e-4,
         'use_double_attention': True,
         'finetune': False
     }
@@ -796,47 +1043,52 @@ if __name__ == "__main__":
     # Loss function and config
     criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding
     config = TrainingConfig(
-        epochs=50,
+        epochs=300,
         batch_size=64,
         lr=model_params['lr'],
         grad_clip=5.0,
-        save_every=5,
+        save_every=10,
         lambda_reg=model_params['lambda_reg'],
-        patience=10,
+        patience=15,
         length_based_sampling=True
     )
     
-    # Path to resume training from (None for fresh training)
-    resume_path = None  # Change this to the path of your checkpoint
+    # Setup for resuming training
+    # These are the values you should modify to resume training
+    resume_path = None  # Path to the .pt file to load (e.g., "checkpoints/sat_epoch10.pt")
+    start_epoch = 1     # The epoch number to start from (e.g., 11 if resuming after epoch 10)
     
-    # You can uncomment and modify this to specify a checkpoint path:
-    # resume_path = "checkpoints/best_checkpoint.pt"  # or any other checkpoint
+    # Example: If you want to resume from epoch 10 checkpoint:
+    # resume_path = "checkpoints/sat_epoch10.pt"
+    # start_epoch = 11
     
-    # If a command line argument is provided for the resume path
-    import sys
-    if len(sys.argv) > 1:
-        resume_path = sys.argv[1]
-        print(f"Resuming training from: {resume_path}")
+    # Parse command line arguments if provided
+    # No '/' at the end!
+    # resume_path = './checkpoints/sat_epoch50.pt'
+    # start_epoch = 51
+    
+    if resume_path:
+        print(f"Resuming training from {resume_path} at epoch {start_epoch}")
     
     # Train the model
     print("Starting training...")
-    model, val_bleu1, val_bleu2, val_bleu3, val_bleu4 = train_and_evaluate(
+    model, val_bleu1, val_bleu2, val_bleu3, val_bleu4, val_meteor = train_and_evaluate(
         model, 
         train_dataset,
         val_dataset,
         criterion, 
         config, 
         vocab_size,
-        resume_from=resume_path
+        resume_from=resume_path,
+        start_epoch=start_epoch
     )
     
-    # Print all BLEU scores after training
+    # Print all evaluation scores after training
     print(f"Validation BLEU-1: {val_bleu1:.4f}")
     print(f"Validation BLEU-2: {val_bleu2:.4f}")
     print(f"Validation BLEU-3: {val_bleu3:.4f}")
     print(f"Validation BLEU-4: {val_bleu4:.4f}")
-
-    zip_and_download_checkpoints("checkpoints")
+    print(f"Validation METEOR: {val_meteor:.4f}")
     
     # Final evaluation on test set
     print("Evaluating on test set...")
@@ -846,172 +1098,41 @@ if __name__ == "__main__":
         shuffle=False, 
         collate_fn=collate_fn
     )
-    test_bleu1, test_bleu2, test_bleu3, test_bleu4 = evaluate_bleu_with_beam(model, test_loader, config.device, vocab)
+    test_bleu1, test_bleu2, test_bleu3, test_bleu4, test_meteor = evaluate_bleu_and_meteor_with_beam(model, test_loader, config.device, vocab)
     
-    # Print BLEU scores for test set
+    # Print evaluation scores for test set
     print(f"Test BLEU-1 score: {test_bleu1:.4f}")
     print(f"Test BLEU-2 score: {test_bleu2:.4f}")
     print(f"Test BLEU-3 score: {test_bleu3:.4f}")
     print(f"Test BLEU-4 score: {test_bleu4:.4f}")
+    print(f"Test METEOR score: {test_meteor:.4f}")
     
-    # Generate and save some sample captions
-    def generate_sample_captions(model, dataset, device, num_samples=5):
-        model.eval()
-        sampler = torch.utils.data.RandomSampler(dataset, replacement=False, num_samples=num_samples)
-        loader = DataLoader(dataset, batch_size=1, sampler=sampler, collate_fn=collate_fn)
-        
-        samples = []
-        with torch.no_grad():
-            for images, captions, lengths in loader:
-                images = images.to(device)
-                a = model.encoder(images)
-                pred_captions, attention_maps = model.decoder.sample(
-                    a, 
-                    max_len=20, 
-                    start_idx=vocab.word2idx["<START>"], 
-                    end_idx=vocab.word2idx["<END>"]
-                )
-                
-                # Convert to text
-                pred_text = ' '.join([vocab.idx2word[idx] for idx in pred_captions[0] 
-                                     if idx not in {0, 1, 2}])  # Exclude PAD, START, END
-                                     
-                # Get reference caption
-                ref_text = ' '.join([vocab.idx2word[idx.item()] for idx in captions[0] 
-                                   if idx.item() not in {0, 1, 2}])
-                
-                samples.append({
-                    'prediction': pred_text,
-                    'reference': ref_text,
-                    'attention_maps': attention_maps[0]
-                })
-        
-        return samples
+    # print("Generating sample captions with attention visualization...")
+    samples = generate_sample_captions(model, test_dataset, device, num_samples=10)
     
-    print("Generating sample captions...")
-    samples = generate_sample_captions(model, test_dataset, device)
+    # Create a directory for saving visualizations
+    os.makedirs("attention_visualizations", exist_ok=True)
     
-    # Print sample results
+    # Visualize attention maps for each sample
     for i, sample in enumerate(samples):
-        print(f"\nSample {i+1}:")
-        print(f"Reference: {sample['reference']}")
-        print(f"Prediction: {sample['prediction']}")
+      print(f"\nSample {i+1}:")
+      print(f"Reference: {sample['reference']}")
+      print(f"Prediction: {sample['prediction']}")
+      
+      # Get the image path from the dataset
+      img_idx = test_dataset.indices[sample['dataset_idx']]
+      img_name = os.path.join(img_folder, test_dataset.dataset.image_names[img_idx])
+      
+      # Visualize attention
+      save_path = f"attention_visualizations/sample_{i+1}.png"
+      visualize_attention_paper_style(
+          img_name, 
+          sample['prediction_indices'], 
+          sample['attention_maps'], 
+          vocab,
+          reference_caption=sample['reference'],  # Pass the reference caption
+          save_path=save_path
+      )
+      print(f"Attention visualization saved to {save_path}")
     
     print("\nTraining and evaluation complete!")
-
-################################################################################
-# Visualization Utilities
-################################################################################
-
-def visualize_attention(image_path, caption, attention_maps, vocab, save_path=None):
-    """
-    Visualize attention weights overlaid on the original image.
-    
-    Args:
-        image_path: Path to the image
-        caption: List of word indices
-        attention_maps: List of attention weight tensors
-        vocab: Vocabulary object for converting indices to words
-        save_path: Path to save the visualization, if None will display instead
-    """
-    import matplotlib.pyplot as plt
-    from matplotlib.pyplot import cm
-    import numpy as np
-
-    if not os.path.exists(image_path):
-        print(f"[Warning] Missing image file: {image_path}. Skipping.")
-        return
-
-    image = Image.open(img_name).convert("RGB")
-
-    img = Image.open(image_path).convert('RGB')
-    plt.figure(figsize=(14, 14))
-    
-    # Remove special tokens from caption
-    words = [vocab.idx2word[idx] for idx in caption if idx not in {0, 1, 2}]
-    
-    # Number of attention maps
-    num_maps = min(len(words), len(attention_maps))
-    
-    # Create a grid for subplots (original image + attention maps)
-    rows = int(np.ceil(np.sqrt(num_maps + 1)))
-    cols = int(np.ceil((num_maps + 1) / rows))
-    
-    # Show original image
-    plt.subplot(rows, cols, 1)
-    plt.imshow(img)
-    plt.title('Original Image', fontsize=12)
-    plt.axis('off')
-    
-    # Show attention maps
-    for i in range(num_maps):
-        plt.subplot(rows, cols, i + 2)
-        
-        # Reshape attention to original image size
-        att_map = attention_maps[i].reshape(14, 14)
-        att_map = att_map.detach().numpy()
-        
-        # Resize attention map to match image dimensions
-        att_map = np.array(Image.fromarray(att_map).resize(img.size, Image.BICUBIC))
-        
-        # Normalize attention map
-        att_map = att_map / np.max(att_map)
-        
-        # Create attention heatmap
-        cmap = cm.hot
-        plt.imshow(img)
-        plt.imshow(att_map, alpha=0.6, cmap=cmap)
-        plt.title(f"'{words[i]}'", fontsize=12)
-        plt.axis('off')
-    
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path)
-        plt.close()
-    else:
-        plt.show()
-
-def demo_captioning(model, image_path, vocab, device, transform=None):
-    """
-    Generate a caption for a single image and visualize attention.
-    
-    Args:
-        model: Trained ShowAttendTell model
-        image_path: Path to the image file
-        vocab: Vocabulary object
-        device: Device to run inference on
-        transform: Image transformations
-    """
-    if transform is None:
-        transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-    
-    # Load and preprocess the image
-    image = Image.open(image_path).convert('RGB')
-    image_tensor = transform(image).unsqueeze(0).to(device)
-    
-    # Generate caption
-    model.eval()
-    with torch.no_grad():
-        features = model.encoder(image_tensor)
-        captions, attention_maps = model.decoder.sample(
-            features,
-            max_len=20,
-            start_idx=vocab.word2idx["<START>"],
-            end_idx=vocab.word2idx["<END>"]
-        )
-    
-    # Convert caption to text
-    caption = captions[0]
-    words = [vocab.idx2word[idx] for idx in caption if idx not in {0, 1, 2}]
-    caption_text = ' '.join(words)
-    
-    print(f"Generated caption: {caption_text}")
-    
-    # Visualize attention
-    visualize_attention(image_path, caption, attention_maps[0], vocab)
-    
-    return caption_text, attention_maps[0]
