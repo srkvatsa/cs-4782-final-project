@@ -1,0 +1,11 @@
+torch==2.2.2          
+torchvision==0.17.2
+torchaudio==2.2.2
+nltk>=3.8
+tqdm>=4.66
+kagglehub>=0.2
+Pillow>=10.2
+opencv-python-headless==4.10.0.82
+scipy>=1.11
+matplotlib>=3.8
+numpy<2
