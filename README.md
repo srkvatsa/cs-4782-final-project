@@ -16,6 +16,7 @@ Explanations of each of the different files used in the project:
 
 - `run_sat.ipynb` - Python notebook which user can interact with to train, test, and visualize the results of our model. It interacts with both the code and data directories.
 
+ 
 ### Code Directory
 - `datasets.py` - Vocabulary, Flickr8kDataset, collate_fn, LengthBasedBatchSampler, helpers
 - `models.py` - Neural architectures: EncoderCNN, Attention, DecoderRNN, ShowAttendTell
