@@ -12,7 +12,6 @@ from torch.utils.data import Dataset
 from PIL import Image
 
 
-# ---------- Vocabulary ----------
 class Vocabulary:
     def __init__(self, freq_threshold=5):
         self.word2idx = {"<PAD>": 0, "<START>": 1, "<END>": 2, "<UNK>": 3}
@@ -23,13 +22,10 @@ class Vocabulary:
         frequencies = Counter()
         idx = 4
 
-        # First pass: count frequencies
         for sentence in sentence_list:
             tokens = nltk.tokenize.word_tokenize(sentence.lower())
             frequencies.update(tokens)
 
-        # Second pass: add words that meet threshold
-        # Sort by frequency (descending) and take the top 9996 (excluding 4 special tokens)
         most_common = frequencies.most_common(10000 - 4)
         for word, _ in most_common:
             self.word2idx[word] = idx
@@ -73,13 +69,10 @@ def collate_fn(batch):
     """Custom collate function for padding sequences in a batch."""
     images, captions, lengths = zip(*batch)
 
-    # Stack all images in batch
     images = torch.stack(images, 0)
 
-    # Store original lengths before padding
     lengths = torch.tensor(lengths)
 
-    # Pad sequences to max length in batch
     padded_captions = torch.nn.utils.rnn.pad_sequence(
         captions, batch_first=True, padding_value=0
     )
@@ -87,7 +80,6 @@ def collate_fn(batch):
     return images, padded_captions, lengths.tolist()
 
 
-# ---------- Flickr8k ----------
 class Flickr8kDataset(Dataset):
     def __init__(self, img_folder, captions_file, vocab=None, transform=None):
         self.img_folder = img_folder
@@ -109,24 +101,22 @@ class Flickr8kDataset(Dataset):
                     if os.path.exists(img_path):
                         self.image_names.append(img_file)
                         self.texts.append(caption)
-                        self.captions[img_file].append(caption)  # <-- store in dict
+                        self.captions[img_file].append(caption)  
                     else:
                         skipped += 1
 
         if skipped:
             print(f"[Info] Skipped {skipped} captions with missing images.")
 
-        # Build vocabulary if not provided
         if vocab is None:
             self.vocab = Vocabulary().build_vocab(self.texts)
         else:
             self.vocab = vocab
 
-        # Group captions by length for length-based batching
         self.length_to_indices = defaultdict(list)
         for idx, text in enumerate(self.texts):
             caption = self.vocab.numericalize(text)
-            caption_length = len(caption) + 2  # +2 for <START> and <END>
+            caption_length = len(caption) + 2  
             self.length_to_indices[caption_length].append(idx)
 
         self.available_lengths = sorted(self.length_to_indices.keys())
@@ -171,7 +161,6 @@ def get_flickr8k_splits(data_dir, transform):
     )
     vocab = dataset.vocab
 
-    # Load split files
     def load_split(file_name):
         path = os.path.join(data_dir, file_name)
         with open(path, "r") as f:
@@ -181,7 +170,6 @@ def get_flickr8k_splits(data_dir, transform):
     val_images = load_split("Flickr_8k.devImages.txt")
     test_images = load_split("Flickr_8k.testImages.txt")
 
-    # Filter indices based on image_names
     train_indices = [
         i for i, name in enumerate(dataset.image_names) if name in train_images
     ]
@@ -204,9 +192,6 @@ def get_flickr8k_splits(data_dir, transform):
     return train_dataset, val_dataset, test_dataset, vocab
 
 
-################################################################################
-# Length-Based Batch Sampler
-################################################################################
 class LengthBasedBatchSampler:
     """
     Batch sampler that samples batches of uniform caption length, as described
@@ -219,35 +204,27 @@ class LengthBasedBatchSampler:
         self.shuffle = shuffle
         self.drop_last = drop_last
 
-        # Handle both Dataset and Subset objects
         if hasattr(dataset, "length_to_indices"):
-            # Original dataset
             self.length_to_indices = dataset.length_to_indices
         elif hasattr(dataset, "dataset") and hasattr(
             dataset.dataset, "length_to_indices"
         ):
-            # Subset object - rebuild length_to_indices using only the indices in the subset
             self.length_to_indices = defaultdict(list)
             original_dataset = dataset.dataset
             subset_indices = dataset.indices
 
-            # Map subset indices to original indices
             for i, idx in enumerate(subset_indices):
-                # Get the caption length from the original dataset
                 text = original_dataset.texts[idx]
                 caption = original_dataset.vocab.numericalize(text)
-                caption_length = len(caption) + 2  # +2 for <START> and <END>
-                # Store the subset index (i) in our new length_to_indices
+                caption_length = len(caption) + 2  
                 self.length_to_indices[caption_length].append(i)
         else:
             raise TypeError(
                 "Dataset must have length_to_indices attribute or be a Subset of such a dataset"
             )
 
-        # Store available lengths for length-based sampling
         self.available_lengths = sorted(list(self.length_to_indices.keys()))
 
-        # Pre-calculate total batches
         self.total_batches = self._calculate_total_batches()
 
     def _calculate_total_batches(self):
@@ -264,11 +241,9 @@ class LengthBasedBatchSampler:
         all_batches = []
 
         for _ in range(self.total_batches):
-            # Randomly sample a length
             length = random.choice(lengths)
             indices = self.length_to_indices[length]
 
-            # Sample a batch of that length
             batch = (
                 random.sample(indices, self.batch_size)
                 if len(indices) >= self.batch_size
@@ -277,7 +252,6 @@ class LengthBasedBatchSampler:
 
             all_batches.append(batch)
 
-        # Shuffle final batch order
         if self.shuffle:
             random.shuffle(all_batches)
 

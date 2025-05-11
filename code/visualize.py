@@ -11,7 +11,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import math
 
-# matplot / cv2 imports go here
 
 
 def find_idx(dataset, vocab, target_caption_text):
@@ -25,26 +24,21 @@ def find_idx(dataset, vocab, target_caption_text):
             vocab.idx2word[token.item()]
             for token in caption_tensor
             if token.item() not in {0, 1, 2}
-        ]  # Exclude special tokens
+        ]  
         caption_text = " ".join(caption_words)
 
         if target_caption_text.strip().lower() in caption_text.strip().lower():
             print("Found: ", target_caption_text)
-            return idx  # Found it!
+            return idx  
 
     print(target_caption_text, "Not Found")
-    return None  # Not found
+    return None  
 
 
 def generate_sample_captions(
     model, dataset, vocab, device, indices, num_samples=15, beam_size=10
 ):
     model.eval()
-    # indices = random.sample(range(len(dataset)), num_samples)
-    # print(indices)
-    # indices = [find_idx(dataset, vocab, "frisbee"),
-    #           #  find_idx(dataset, vocab, "giraffe")
-    # ]
 
     samples = []
     with torch.no_grad():
@@ -52,10 +46,8 @@ def generate_sample_captions(
             image, caption, _ = dataset[idx]
             image = image.unsqueeze(0).to(device)
 
-            # Get image features
             features = model.encoder(image)
 
-            # Generate caption using BEAM SEARCH
             pred_indices, attention_maps = model.decoder.beam_search(
                 features,
                 beam_size=beam_size,
@@ -64,12 +56,10 @@ def generate_sample_captions(
                 end_idx=vocab.word2idx["<END>"],
             )
 
-            # Convert prediction to text
             pred_text = " ".join(
                 [vocab.idx2word[idx] for idx in pred_indices if idx not in {0, 1, 2}]
-            )  # Exclude PAD, START, END
+            )  
 
-            # Get reference caption
             ref_text = " ".join(
                 [
                     vocab.idx2word[idx.item()]
@@ -115,30 +105,23 @@ def visualize_attention_paper_style(
         blob /= blob.max() + 1e-8
         return blob
 
-    # Open image
     img = Image.open(image_path).convert("RGB")
     img_np = np.array(img)
     img_height, img_width = img_np.shape[:2]
 
-    # Filter out special tokens
     words = [vocab.idx2word[idx] for idx in caption_indices if idx not in {0, 1, 2}]
     prediction = " ".join(words)
     num_words = min(len(words), len(attention_maps))
 
-    # Calculate layout dimensions
     max_per_row = 4
-    num_rows = math.ceil((num_words + 1) / max_per_row)  # +1 for original image
+    num_rows = math.ceil((num_words + 1) / max_per_row)  
 
-    # Create figure with appropriate size
-    # Adjust figure size based on number of rows and columns
-    fig_width = 16  # wider figure
-    fig_height = 4 * num_rows  # height depends on number of rows
+    fig_width = 16  
+    fig_height = 4 * num_rows  
     fig = plt.figure(figsize=(fig_width, fig_height))
 
-    # Add space between rows
     plt.subplots_adjust(hspace=0.3)
 
-    # Plot original image with full caption (first position)
     plt.subplot(num_rows, max_per_row, 1)
     plt.imshow(img_np)
     if reference_caption:
@@ -149,47 +132,36 @@ def visualize_attention_paper_style(
         plt.title(f"Prediction: {prediction}", fontsize=10)
     plt.axis("off")
 
-    # Plot attention maps
     for i in range(num_words):
-        # Calculate subplot position (add 1 because we already used position 1)
         position = i + 2
 
-        # Create subplot
         plt.subplot(num_rows, max_per_row, position)
 
-        # Process attention map
         att_map = attention_maps[i].cpu().detach().numpy()
 
-        # If attention is nearly one-hot, treat as hard attention and generate a blob
         if np.count_nonzero(att_map > 0.9 * att_map.max()) == 1:
             max_idx = att_map.argmax()
             att_map = generate_gaussian_blob(max_idx, map_size=(14, 14), sigma=1.0)
         else:
-            # Soft attention: reshape to 2D map
             att_map = att_map.reshape(14, 14)
 
-        # Normalize attention map
-        att_map = att_map / (att_map.max() + 1e-8)  # Normalize to [0,1]
+        att_map = att_map / (att_map.max() + 1e-8)  
 
-        # Create a high-resolution version using cv2 for better quality
         att_map_large = cv2.resize(
             att_map, (img_width, img_height), interpolation=cv2.INTER_CUBIC
         )
 
-        # Apply additional strong Gaussian blur for very smooth appearance
         sigma = max(img_width, img_height) / 50
         att_map_large = cv2.GaussianBlur(
-            att_map_large, (0, 0), sigma  # Auto-compute kernel size from sigma
+            att_map_large, (0, 0), sigma  
         )
 
-        # Display original image
         plt.imshow(img_np)
 
-        # Display the attention as white highlights on the original image
         plt.imshow(
             att_map_large,
-            cmap="gray",  # Simple white highlights
-            alpha=0.7,  # Adjust transparency as needed
+            cmap="gray",  
+            alpha=0.7,  
             interpolation="bilinear",
             vmin=0,
             vmax=1,
@@ -198,7 +170,6 @@ def visualize_attention_paper_style(
         plt.title(f"'{words[i]}'", fontsize=10)
         plt.axis("off")
 
-    # Hide any unused subplots
     for i in range(num_words + 2, num_rows * max_per_row + 1):
         ax = fig.add_subplot(num_rows, max_per_row, i)
         ax.axis("off")

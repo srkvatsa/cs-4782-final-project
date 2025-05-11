@@ -12,11 +12,6 @@ from typing import List, Tuple, Optional
 import random
 
 
-################################################################################
-# Encoder – fixed CNN backbone (VGG‑16 conv4_3 by default) that outputs a grid
-# of visual features (L positions, D channels).  Gradients flow through the
-# backbone (finetune=True) or only through a learned 1×1 projection (finetune=False).
-################################################################################
 class EncoderCNN(nn.Module):
     """Extract convolutional feature maps suitable for attention‑based decoding."""
 
@@ -24,12 +19,11 @@ class EncoderCNN(nn.Module):
         super().__init__()
         if backbone == "vgg19":
             cnn = models.vgg19(weights=models.VGG19_Weights.IMAGENET1K_V1)
-            # Keep layers up to conv4_3 feature map (before max‑pool).
-            self.features = cnn.features[:36]  # conv4_3 relu
+            self.features = cnn.features[:36]  
             feature_dim = 512
         elif backbone == "resnet50":
             cnn = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
-            modules = list(cnn.children())[:-2]  # until C5 feature map (7×7×2048)
+            modules = list(cnn.children())[:-2]  
             self.features = nn.Sequential(*modules)
             feature_dim = 2048
         else:
@@ -38,29 +32,25 @@ class EncoderCNN(nn.Module):
         self.adaptive_pool = nn.AdaptiveAvgPool2d((14, 14))
         self.project = nn.Conv2d(feature_dim, feature_dim, kernel_size=1)
 
-        # Decide if we fine‑tune the backbone weights.
         for p in self.features.parameters():
             p.requires_grad = finetune
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         """Images → annotation vectors (B, L=196, D)."""
-        feats = self.adaptive_pool(self.features(images))  # (B, C, 14, 14)
-        feats = self.project(feats)  # (B, D, 14, 14)
+        feats = self.adaptive_pool(self.features(images))  
+        feats = self.project(feats)  
         B, D, H, W = feats.shape
-        return feats.view(B, D, H * W).permute(0, 2, 1)  # (B, L, D)
+        return feats.view(B, D, H * W).permute(0, 2, 1)  
 
 
-################################################################################
-# Additive attention: fatt(a_i, h_{t‑1}) = v^T tanh(W_a a_i + W_h h_{t‑1})
-################################################################################
 class DualAdditiveAttention(nn.Module):
     def __init__(self, feature_dim: int, hidden_dim: int, attn_dim: int) -> None:
         super().__init__()
         self.W_a = nn.Linear(feature_dim, attn_dim, bias=False)
         self.W_h = nn.Linear(hidden_dim, attn_dim, bias=False)
-        self.W_c = nn.Linear(hidden_dim, attn_dim, bias=False)  # for context input
+        self.W_c = nn.Linear(hidden_dim, attn_dim, bias=False)  
         self.v = nn.Linear(attn_dim, 1, bias=False)
-        self.beta_fc = nn.Linear(hidden_dim, 1)  # for gating scalar
+        self.beta_fc = nn.Linear(hidden_dim, 1)  
         self.dropout = nn.Dropout(p=0.1)
 
     def forward(
@@ -75,41 +65,36 @@ class DualAdditiveAttention(nn.Module):
             h_prev: (B, H) – previous LSTM state
             context_input: optional (B, H) – something else to attend with
         """
-        wh = self.W_h(h_prev).unsqueeze(1)  # (B, 1, A)
-        wa = self.W_a(a)  # (B, L, A)
+        wh = self.W_h(h_prev).unsqueeze(1)  
+        wa = self.W_a(a)  
         score_input = wa + wh
 
         if context_input is not None:
-            wc = self.W_c(context_input).unsqueeze(1)  # (B, 1, A)
+            wc = self.W_c(context_input).unsqueeze(1)  
             score_input = score_input + wc
 
-        e = self.v(torch.tanh(score_input)).squeeze(-1)  # (B, L)
+        e = self.v(torch.tanh(score_input)).squeeze(-1)  
         alpha = F.softmax(e, dim=1)
 
-        # Calculate gating scalar β
-        beta = torch.sigmoid(self.beta_fc(h_prev))  # (B, 1)
+        beta = torch.sigmoid(self.beta_fc(h_prev))  
 
-        context = torch.bmm(alpha.unsqueeze(1), a).squeeze(1)  # (B, D)
-        gated_context = beta * context  # Apply gating
+        context = torch.bmm(alpha.unsqueeze(1), a).squeeze(1)  
+        gated_context = beta * context  
 
         return gated_context, alpha, beta
 
 
-################################################################################
-# Decoder – LSTM cell unrolled for T time‑steps with attention each step.
-################################################################################
-# Define the BeamNode class for tracking partial sequences
 class BeamNode:
     def __init__(
         self, prev_node, word_id, logprob, length, hidden_state, cell_state, alpha
     ):
-        self.prev_node = prev_node  # Previous node in the beam
-        self.word_id = word_id  # Current word index
-        self.logprob = logprob  # Cumulative log-probability
-        self.length = length  # Current length of the sequence
-        self.hidden_state = hidden_state  # LSTM hidden state
-        self.cell_state = cell_state  # LSTM cell state
-        self.alpha = alpha  # Attention map at this step
+        self.prev_node = prev_node  
+        self.word_id = word_id  
+        self.logprob = logprob  
+        self.length = length  
+        self.hidden_state = hidden_state  
+        self.cell_state = cell_state  
+        self.alpha = alpha  
 
     def sequence(self):
         seq = []
@@ -117,7 +102,7 @@ class BeamNode:
         while node.prev_node is not None:
             seq.append(node.word_id)
             node = node.prev_node
-        return seq[::-1]  # reverse
+        return seq[::-1]  
 
     def score(self):
         alpha = 0.5
@@ -187,17 +172,15 @@ class DecoderRNN(nn.Module):
         log_probs: List[torch.Tensor] = []
         entropies: List[torch.Tensor] = []
 
-        prev_h = h  # for double attention
+        prev_h = h  
 
-        # First input is always <START> token
         inputs = captions[:, 0]
 
         for t in range(1, T):
-            # Use previous word as input with probability (1 - teacher_forcing_ratio)
             if t > 1 and random.random() > teacher_forcing_ratio:
-                inputs = predicted  # Use model's prediction
+                inputs = predicted  
             else:
-                inputs = captions[:, t - 1]  # Use ground truth
+                inputs = captions[:, t - 1]  
 
             context_input = prev_h if self.use_double_attention else None
             if self.use_hard_attention:
@@ -209,25 +192,22 @@ class DecoderRNN(nn.Module):
             else:
                 context, alpha, beta = self.attention(a, h, context_input)
 
-            # Get word embedding
             emb = self.embed(inputs)
 
             lstm_input = torch.cat([emb, context], dim=1)
             h, c = self.lstm(lstm_input, (h, c))
             output = self.fc(self.dropout(h))
 
-            # Get prediction for next step
             _, predicted = output.max(dim=1)
 
             logits.append(output)
             alphas.append(alpha)
             betas.append(beta)
-            prev_h = h  # update for next time step
+            prev_h = h  
 
         logits = torch.stack(logits, dim=1)
         alphas = torch.stack(alphas, dim=1)
 
-        # Pack padded sequences
         packed_logits = pack_padded_sequence(
             logits, [l - 1 for l in lengths], batch_first=True, enforce_sorted=False
         ).data
@@ -254,9 +234,9 @@ class DecoderRNN(nn.Module):
             List[int]: Predicted caption as a list of word indices
         """
         device = features.device
-        inputs = torch.tensor([start_idx], device=device)  # (1,)
+        inputs = torch.tensor([start_idx], device=device)  
 
-        h, c = self.init_hidden_state(features)  # (1, hidden_dim)
+        h, c = self.init_hidden_state(features)  
         prev_h = h
         outputs = []
 
@@ -269,20 +249,20 @@ class DecoderRNN(nn.Module):
             else:
                 context, alpha, beta = self.attention(features, h, context_input)
 
-            emb = self.embed(inputs).squeeze(1)  # (1, embed_dim)
+            emb = self.embed(inputs).squeeze(1)  
             lstm_input = torch.cat([emb, context], dim=1)
             h, c = self.lstm(lstm_input, (h, c))
 
-            output = self.fc(self.dropout(h))  # (1, vocab_size)
-            predicted = output.argmax(dim=1)  # (1,)
+            output = self.fc(self.dropout(h))  
+            predicted = output.argmax(dim=1)  
             predicted_idx = predicted.item()
 
             if predicted_idx == end_idx:
                 break
 
             outputs.append(predicted_idx)
-            inputs = predicted  # Use prediction as next input
-            prev_h = h  # update for next step
+            inputs = predicted  
+            prev_h = h  
 
         return outputs
 
@@ -332,30 +312,27 @@ class DecoderRNN(nn.Module):
                 h, c = node.hidden_state, node.cell_state
                 context_input = h if self.use_double_attention else None
 
-                # ---- Attention ----
                 if self.use_hard_attention:
-                    # Hard attention deterministic mode
                     context, alpha, _, _, _ = self.hard_attention_step(
                         a, h, context_input, mode="deterministic"
                     )
                 else:
                     context, alpha, _ = self.attention(a, h, context_input)
-                # -------------------
 
                 emb = self.embed(
                     torch.tensor([node.word_id], device=device)
-                )  # (1, embed_dim)
+                )  
                 lstm_input = torch.cat(
                     [emb, context], dim=1
-                )  # (1, embed_dim + feature_dim)
-                h, c = self.lstm(lstm_input, (h, c))  # (1, hidden_dim)
+                )  
+                h, c = self.lstm(lstm_input, (h, c))  
 
-                output = self.fc(self.dropout(h))  # (1, vocab_size)
+                output = self.fc(self.dropout(h))  
                 scores = F.log_softmax(
                     output / self.temperature, dim=-1
-                )  # (1, vocab_size)
+                )  
 
-                logprobs, top_ids = scores.topk(beam_size, dim=-1)  # (1, beam_size)
+                logprobs, top_ids = scores.topk(beam_size, dim=-1)  
 
                 for i in range(beam_size):
                     next_node = BeamNode(
@@ -365,11 +342,10 @@ class DecoderRNN(nn.Module):
                         length=node.length + 1,
                         hidden_state=h,
                         cell_state=c,
-                        alpha=alpha,  # Save attention for visualization
+                        alpha=alpha,  
                     )
                     next_nodes.append(next_node)
 
-            # Keep top beam_size nodes
             nodes = sorted(next_nodes, key=lambda n: n.score(), reverse=True)[
                 :beam_size
             ]
@@ -382,7 +358,6 @@ class DecoderRNN(nn.Module):
 
         best_node = sorted(end_nodes, key=lambda n: n.score(), reverse=True)[0]
 
-        # Trace back the path
         sequence = []
         alphas = []
 
@@ -392,7 +367,7 @@ class DecoderRNN(nn.Module):
             alphas.append(node.alpha)
             node = node.prev_node
 
-        sequence = sequence[::-1]  # reverse to correct order
+        sequence = sequence[::-1]  
         alphas = alphas[::-1]
 
         return sequence, alphas
@@ -413,7 +388,7 @@ class DecoderRNN(nn.Module):
         captions: List[List[int]] = [[start_idx] for _ in range(B)]
         attention_maps: List[List[torch.Tensor]] = [[] for _ in range(B)]
 
-        prev_h = h  # for double attention
+        prev_h = h  
 
         for t in range(max_len):
             context_input = prev_h if self.use_double_attention else None
@@ -426,23 +401,20 @@ class DecoderRNN(nn.Module):
 
             emb = self.embed(inputs)
             h, c = self.lstm(torch.cat([emb, context], dim=1), (h, c))
-            scores = self.fc(h)  # (B, vocab_size)
+            scores = self.fc(h)  
 
-            # Sample next word (not greedy max!)
-            probs = F.softmax(scores, dim=-1)  # (B, vocab_size)
+            probs = F.softmax(scores, dim=-1)  
             next_word = torch.multinomial(probs, 1).squeeze(
                 1
-            )  # Sample 1 word per example
+            )  
 
             for i in range(B):
                 captions[i].append(next_word[i].item())
                 attention_maps[i].append(alpha[i].detach().cpu())
 
-            # Prepare next inputs
             inputs = next_word
             prev_h = h
 
-            # Early stopping: end after <END> token, but force minimum length
             all_ended = True
             for i in range(B):
                 if t < force_min_len or captions[i][-1] != end_idx:
@@ -451,7 +423,6 @@ class DecoderRNN(nn.Module):
             if all_ended:
                 break
 
-        # Cut off after first <END> token for each caption
         clean_caps = []
         for cap in captions:
             if end_idx in cap:
@@ -498,7 +469,7 @@ class DecoderRNN(nn.Module):
             alpha = F.one_hot(idx, num_classes=a.size(1)).float()
         elif mode == "deterministic":
             idx = torch.argmax(alpha, dim=1)
-            log_prob = torch.zeros(a.size(0), device=a.device)  #
+            log_prob = torch.zeros(a.size(0), device=a.device)  
             context = a[torch.arange(a.size(0), device=a.device), idx]
             alpha = F.one_hot(idx, num_classes=a.size(1)).float()
 
@@ -506,9 +477,6 @@ class DecoderRNN(nn.Module):
         return context, alpha, beta, log_prob, entropy
 
 
-################################################################################
-# Full model wrapper (encoder + decoder) to simplify training/inference.
-################################################################################
 class ShowAttendTell(nn.Module):
     def __init__(self, vocab_size: int, **kwargs):
         super().__init__()
