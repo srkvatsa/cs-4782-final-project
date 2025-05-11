@@ -71,7 +71,7 @@ Each section is clearly labeled with comments and can be run sequentially to rep
 
 After completing training, the visualization section will output where our model is attending and its caption attempts. An example is included below:
 
-[TODO ADD EXAMPLE VISUALIZATION HERE]
+![Example Visualization](results/outputs/demo.png)
 
 ## Results/Insights
 TODO
