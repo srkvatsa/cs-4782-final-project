@@ -11,9 +11,14 @@ The present paper directly iterates on the approach given by Vinyal's et. al 201
 
 1. Clone this repository.
 
-2. Open the notebook. It is organized into clearly labeled sections.
+2. Create a virtual environment and install the required packages:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+3. Open the notebook. It is organized into clearly labeled sections.
 
-3. Run each section sequentially to reproduce the results.
+4. Run each section sequentially to reproduce the results.
 
 ## File Info
 
@@ -33,6 +38,7 @@ Explanations of each of the different files used in the project:
   - `corpora/` - Natural language corpora for text processing
   - `tokenizers/` - Text tokenization resources
 
+## Running the Notebook
 ## Chosen Result 
 ## GitHub Contents
 ## Re-Implementation Details
