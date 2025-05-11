@@ -36,8 +36,11 @@ Explanations of each of the different files used in the project:
   - `corpora/` - Natural language corpora for text processing
   - `tokenizers/` - Text tokenization resources
 
-## Re-implementation Details
-TODO
+## Implementation Details
+![Implementation Details](results/train_eval/implementation_details.png)
+
+We implemented an encoder-decoder framework using a ResNet-50 encoder to produce 14×14×512 image feature maps and an LSTM decoder that generates captions, enhanced by attention mechanisms to dynamically focus on different regions of the image. Soft attention computes a weighted sum over all features, while doubly stochastic attention adds a regularization term to encourage all regions to be attended over time, and hard attention stochastically samples a single feature at each step using REINFORCE due to its non-differentiability. We trained on the Flickr8k dataset using standard splits and evaluated with BLEU-1 and METEOR metrics. Soft attention was optimized with Adam and backpropagation, while hard attention required additional techniques like EMA baselines, entropy regularization, and label smoothing to stabilize training. To accelerate convergence, we applied length-based mini-batching, and for hard attention, we fine-tuned the pretrained soft attention model for 20 extra epochs using REINFORCE. Key training adjustments included linear teacher forcing decay, dropout reduction, beam width expansion, and temperature annealing, resulting in stable soft attention training and reasonably effective hard attention fine-tuning.
+
 
 ## Reproduction Steps
 
@@ -74,7 +77,11 @@ After completing training, the visualization section will output where our model
 ![Example Visualization](results/outputs/demo.png)
 
 ## Results/Insights
-TODO
+
+![Metrics](results/train_eval/metrics.png)
+
+Despite lacking access to the original paper’s hyperparameters and optimization details, our models achieved higher METEOR scores on Flickr8k—improving by +0.03 for soft attention and +0.45 for hard attention—demonstrating the robustness and replicability of the original approach. While BLEU-1 scores were lower, likely due to unknown tokenization methods which BLEU heavily depends on, our strong METEOR results validate the success of our reimplementation. Due to the absence of several published training details, we made heuristic choices and trained under single-GPU constraints. Importantly, our approach also enhances interpretability by allowing visualization of the model’s attention through heat maps, offering insight into both correct and incorrect captioning decisions.
+
 
 ## Conclusion
 TODO
