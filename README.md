@@ -41,10 +41,11 @@ TODO
    python -m venv venv
    source venv/bin/activate
    pip install -r requirements.txt
+   ```
+
 3. Open the notebook. It is organized into clearly labeled sections.
 
 4. Run each section sequentially to reproduce the results.
-
 
 ## Running the Notebook
 
