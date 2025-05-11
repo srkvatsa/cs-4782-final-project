@@ -1,10 +1,44 @@
-# Introduction
-# Chosen Result 
-# GitHub Contents
-# Re-Implementation Details
-# Reproduction Steps
-# Results/Insights
-# Conclusion
-# References
-# Acknowledgements
-# 
+# Exploring Show, Attend, Tell Attention Mechanisms for Image Captioning
+
+## Introduction
+
+Image captioning explores the space defined by the intersection of Natural Language Processing (NLP) and Computer Vision (CV). Generating a caption given an image, especially in zero-shot cases, is a difficult task due to the need for semantic alignment between two very different spaces and the inherent subjectivity in what is of importance in an image.
+
+
+The present paper directly iterates on the approach given by Vinyal's et. al 2015 by introducing an attention mechanism to this CNN-RNN paradigm, hence the name **Show Attend Tell**. In addition to the traditional $h_{t-1}$, $y_t$ inputs to the LSTM gates, a context vector $z_t$ is computed using one of the proposed attention variants and is concatenated as an additional input at timestep $t$. In turn, the decoder RNN is able to learn where it should "look" in order to generate the $t$'th caption word. This dynamic attention mechanism helps mitigate the bottlenecking problem of RNN architectures, achieving state-of-the-art BLEU and METEOR scores in 2016, while also providing for increased interpretability.
+
+## Project Setup Instructions
+
+1. Clone this repository.
+
+2. Open the notebook. It is organized into clearly labeled sections.
+
+3. Run each section sequentially to reproduce the results.
+
+## File Info
+
+Explanations of each of the different files used in the project:
+
+- `run_sat.ipynb` - Python notebook which user can interact with to train, test, and visualize the results of our model. It interacts with both the code and data directories.
+
+### Code Directory
+- `datasets.py` - Vocabulary, Flickr8kDataset, collate_fn, LengthBasedBatchSampler, helpers
+- `models.py` - Neural architectures: EncoderCNN, Attention, DecoderRNN, ShowAttendTell
+- `training.py` - Training / evaluation routines, checkpoints, metric helpers
+- `visualize.py` - Utilities for finding samples and plotting attention maps
+
+### Data Directory
+- `kaggle_cache/versions/2/Flickr8kDataset` - Contains the Flickr8k image dataset used for training and testing
+- `nltk_data/` - Contains NLTK resources including:
+  - `corpora/` - Natural language corpora for text processing
+  - `tokenizers/` - Text tokenization resources
+
+## Chosen Result 
+## GitHub Contents
+## Re-Implementation Details
+## Reproduction Steps
+## Results/Insights
+## Conclusion
+
+## References
+## Acknowledgements
