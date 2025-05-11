@@ -8,7 +8,14 @@ Image captioning explores the space defined by the intersection of Natural Langu
 The present paper directly iterates on the approach given by Vinyal's et. al 2015 by introducing an attention mechanism to this CNN-RNN paradigm, hence the name **Show Attend Tell**. In addition to the traditional $h_{t-1}$, $y_t$ inputs to the LSTM gates, a context vector $z_t$ is computed using one of the proposed attention variants and is concatenated as an additional input at timestep $t$. In turn, the decoder RNN is able to learn where it should "look" in order to generate the $t$'th caption word. This dynamic attention mechanism helps mitigate the bottlenecking problem of RNN architectures, achieving state-of-the-art BLEU and METEOR scores in 2016, while also providing for increased interpretability.
 
 ## Chosen Result
-TODO 
+We reproduce the METEOR scores for both soft and hard attention models on Flickr8k, focusing on this metric because it provides more semantically faithful evaluation than BLEU by accounting for linguistic variations. Given our compute constraints, Flickr8k was the optimal dataset to assess the robustness and reproducibility of these techniques under modern training & architectural regimes.
+
+| **Model**        | **B-1** | **B-2** | **B-3** | **B-4** | **METEOR** |
+|------------------|---------|---------|---------|---------|------------|
+| Soft-Attention   | 67      | 44.8    | 29.9    | 19.5    | 18.93      |
+| Hard-Attention   | 67      | 45.7    | 31.4    | 21.3    | 20.30      |
+
+Table: Performance comparison of attention mechanisms on Flickr8k in the original paper [Xu et al., 2015]
 
 ## GitHub Contents 
 
