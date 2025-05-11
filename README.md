@@ -81,6 +81,8 @@ TODO
 
 ## Acknowledgements
 
-We would like to thank the authors of the original papers for their groundbreaking work in attention-based image captioning. Special thanks to [3Blue1Brown's video on attention mechanisms](https://www.youtube.com/watch?v=y1S3Ri7myMg) for providing an excellent intuitive explanation of the concept.
+This project was completed as part of the Cornell CS4782: [Introduction to Deep Learning [SP25] course](https://www.cs.cornell.edu/courses/cs4782/2025sp/). We express our gratitude to the professors and course staff for compute allocations, as well as their sustained advising and feedback.
+
+We would also like to thank the authors of the original papers for their groundbreaking work in attention-based image captioning. Special thanks to [3Blue1Brown's video on attention mechanisms](https://www.youtube.com/watch?v=y1S3Ri7myMg) for providing an excellent intuitive explanation of the concept.
 
 We would like to wish our moms a happy Mother's Day!
