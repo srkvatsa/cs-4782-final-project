@@ -39,12 +39,28 @@ Explanations of each of the different files used in the project:
   - `tokenizers/` - Text tokenization resources
 
 ## Running the Notebook
-## Chosen Result 
-## GitHub Contents
-## Re-Implementation Details
-## Reproduction Steps
-## Results/Insights
-## Conclusion
+
+The notebook `run_sat.ipynb` is organized into 6 main sections:
+
+1. **Setup (00-setup)**: Initializes the project environment, sets up paths, and configures NLTK data directories
+2. **Imports (01-imports)**: Imports necessary modules and sets up the device (CPU/GPU)
+3. **Data (02-data)**: Downloads and prepares the Flickr8k dataset, sets up data transformations
+4. **Model (03-model)**: Initializes the ShowAttendTell model with specified parameters
+5. **Train (04-train)**: Handles the model training and evaluation process
+6. **Visualize (05-visualize)**: Generates sample captions and creates attention visualization plots
+
+Each section is clearly labeled with comments and can be run sequentially to reproduce the results.
+
+## Example Outputs
+
+After completing training, the visualization section will output where our model is attending and its caption attempts. An example is included below:
+
+[TODO ADD EXAMPLE VISUALIZATION AFTER CELL RUNS]
 
 ## References
+
+Credits to the original paper: "Show, Attend and Tell: Neural Image Caption Generation with Visual Attention" (2015), which inspired our replication.
+
 ## Acknowledgements
+
+We would like to wish our moms a happy Mother's Day!
