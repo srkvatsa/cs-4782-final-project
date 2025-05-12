@@ -92,7 +92,6 @@ Our reimplementation of Show, Attend, and Tell successfully reproduced and impro
 
 
 
-
 ## References
 
 [1] Michael Denkowski and Alon Lavie. "Meteor universal: Language specific translation evaluation for any target language." In *Proceedings of the Ninth Workshop on Statistical Machine Translation*, pages 376–380, 2014.
