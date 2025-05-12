@@ -70,6 +70,8 @@ The notebook `run_sat.ipynb` is organized into 6 main sections:
 
 Each section is clearly labeled with comments and can be run sequentially to reproduce the results.
 
+We ran the notebook on Google Colab using a T4 GPU, which took approximately 24 hours to complete.
+
 ## Example Outputs
 
 After completing training, the visualization section will output where our model is attending and its caption attempts. An example is included below:
