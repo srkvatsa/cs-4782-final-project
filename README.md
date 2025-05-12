@@ -91,8 +91,6 @@ Our reimplementation of Show, Attend, and Tell successfully reproduced and impro
 
 ## References
 
-# References
-
 [1] Michael Denkowski and Alon Lavie. "Meteor universal: Language specific translation evaluation for any target language." In *Proceedings of the Ninth Workshop on Statistical Machine Translation*, pages 376–380, 2014.
 
 [2] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. "Deep residual learning for image recognition." In *Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition*, pages 770–778, 2016.
