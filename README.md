@@ -1,5 +1,5 @@
 # Exploring Show, Attend, Tell Attention Mechanisms for Image Captioning
-
+Nick Brenner, Alex Kozik, Brandon Li, Jake Silver, Srivatsa Kundurthy
 ## Introduction
 ****
 Image captioning explores the space defined by the intersection of Natural Language Processing (NLP) and Computer Vision (CV). Generating a caption given an image, especially in zero-shot cases, is a difficult task due to the need for semantic alignment between two very different spaces and the inherent subjectivity in what is of importance in an image.
@@ -87,7 +87,10 @@ Despite lacking access to the original paper’s hyperparameters and optimizatio
 
 ## Conclusion
 
-Our reimplementation of Show, Attend, and Tell successfully reproduced and improved unpon the original paper's results, achieving higher METEOR scores and using modern architectural choices like ResNet50, ADAM, and REINFORCE. 
+Our reimplementation of Show, Attend, and Tell successfully reproduced and improved upon the original paper's results, achieving higher METEOR scores and using modern architectural choices like ResNet50, ADAM, and REINFORCE.
+
+
+
 
 ## References
 
