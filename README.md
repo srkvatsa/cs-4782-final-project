@@ -87,7 +87,11 @@ Despite lacking access to the original paper’s hyperparameters and optimizatio
 
 ## Conclusion
 
-Our reimplementation of Show, Attend, and Tell successfully reproduced and improved upon the original paper's results, achieving higher METEOR scores and using modern architectural choices like ResNet50, ADAM, and REINFORCE.
+Our reimplementation of Show, Attend, and Tell successfully reproduced and improved upon the original paper's results, achieving higher METEOR, despite not having access to the paper's hyperparameters and optimization details. The attention mechanisms were important in enhacncing both the performance and interpretability of the models. Notably, hard attention proved to be useful in generating more accurate and semantically meaningful captions.
+
+One of the most valuable aspects of this project is the interpretability of results for both correct and incorrect results. In correct results, we can see what part of the image the model is attending to during token generation. In incorrect results, it's still useful to see where the model is looking when the incorrect token is generated. This can help us further tune the model and enhance its performance.
+
+Future work for this project would include exploring transformer-based decoding approaches, as they have become state-of-the-art for VLT tasks. Additionally, using more advanced regularization techniques could help address the limitations of hard attention and REINFORCE optimization.
 
 
 
