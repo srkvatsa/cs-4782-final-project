@@ -89,10 +89,37 @@ Our reimplementation of Show, Attend, and Tell successfully reproduced and impro
 
 ## References
 
-1. Xu, K., Ba, J., Kiros, R., Cho, K., Courville, A., Salakhutdinov, R., Zemel, R., Bengio, Y. (2015). "Show, Attend and Tell: Neural Image Caption Generation with Visual Attention." arXiv preprint arXiv:1502.03044. M. Hodosh, P. Young and J. Hockenmaier (2013) 
-2. "Framing Image Description as a Ranking Task: Data, Models and Evaluation Metrics", Journal of Artifical Intellegence Research, Volume 47, pages 853-899 http://www.jair.org/papers/paper3994.html
-3. Hannah Li, Sivaraman K S. "Show, Attend, and Tell Neural Image Caption Generation with Visual Attention". [Slides](https://www.cs.rice.edu/~vo9/vislang/2017/slides/sivahaina.pdf)
-4. Halfling Wizard. (2021). "Show, Attend And Tell - Paper Explained." YouTube. https://www.youtube.com/watch?v=y1S3Ri7myMg 
+# References
+
+[1] Michael Denkowski and Alon Lavie. "Meteor universal: Language specific translation evaluation for any target language." In *Proceedings of the Ninth Workshop on Statistical Machine Translation*, pages 376–380, 2014.
+
+[2] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. "Deep residual learning for image recognition." In *Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition*, pages 770–778, 2016.
+
+[3] Micah Hodosh, Peter Young, and Julia Hockenmaier. "Flickr8k dataset." University of Illinois at Urbana-Champaign, 2013.
+
+[4] Diederik P Kingma and Jimmy Ba. "Adam: A method for stochastic optimization." arXiv preprint arXiv:1412.6980, 2014.
+
+[5] Kishore Papineni, Salim Roukos, Todd Ward, and Wei-Jing Zhu. "Bleu: a method for automatic evaluation of machine translation." *Proceedings of the 40th Annual Meeting of the Association for Computational Linguistics*, pages 311–318, 2002.
+
+[6] Razvan Pascanu, Caglar Gulcehre, Kyunghyun Cho, and Yoshua Bengio. "How to construct deep recurrent neural networks." *Proceedings of the Second International Conference on Learning Representations*, 2014.
+
+[7] Rita Ramos, Desmond Elliott, and Bruno Martins. "Retrieval-augmented transformer for image captioning." In *Proceedings of the 2022 ACM International Conference on Multimedia Retrieval*, pages 123–131. ACM, 2022.
+
+[8] Rita Ramos, Desmond Elliott, and Bruno Martins. "Retrieval-augmented image captioning." In *Proceedings of the 17th Conference of the European Chapter of the Association for Computational Linguistics*, pages 3666–3681. Association for Computational Linguistics, 2023.
+
+[9] Olga Russakovsky, Jia Deng, Hao Su, Jonathan Krause, Sanjeev Satheesh, Sean Ma, Zhiheng Huang, Andrej Karpathy, Aditya Khosla, Michael Bernstein, Alexander C Berg, and Li Fei-Fei. "Imagenet large scale visual recognition challenge." *International Journal of Computer Vision*, 115(3):211–252, 2015.
+
+[10] Karen Simonyan and Andrew Zisserman. "Very deep convolutional networks for large-scale image recognition." arXiv preprint arXiv:1409.1556, 2014.
+
+[11] Christian Szegedy, Vincent Vanhoucke, Sergey Ioffe, Jon Shlens, and Zbigniew Wojna. "Rethinking the inception architecture for computer vision." *Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition*, pages 2818–2826, 2016.
+
+[12] Oriol Vinyals, Alexander Toshev, Samy Bengio, and Dumitru Erhan. "Show and tell: A neural image caption generator." In *Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition*, pages 3156–3164, 2015.
+
+[13] Kelvin Xu, Jimmy Ba, Ryan Kiros, Kyunghyun Cho, Aaron Courville, Ruslan Salakhudinov, Rich Zemel, and Yoshua Bengio. "Show, attend and tell: Neural image caption generation with visual attention." *International Conference on Machine Learning*, pages 2048–2057, 2015.
+
+[14] Shizhuo Dylan Zhang, Curt Tigges, Zory Zhang, Stella Biderman, Maxim Raginsky, and Talia Ringer. "Transformer-based models are not yet perfect at learning to emulate structural recursion." *Transactions on Machine Learning Research*, 2024.
+
+[15] Wei Zhang and Jing Zhang. "TPCap: Unlocking zero-shot image captioning with trigger-augmented and multi-modal purification modules." arXiv preprint arXiv:2502.11024, 2025.
 
 ## Acknowledgements
 
