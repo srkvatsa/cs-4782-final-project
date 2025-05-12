@@ -87,7 +87,9 @@ Despite lacking access to the original paper’s hyperparameters and optimizatio
 
 ## Conclusion
 
-Our reimplementation of Show, Attend, and Tell successfully reproduced and improved unpon the original paper's results, achieving higher METEOR scores and using modern architectural choices like ResNet50, ADAM, and REINFORCE. 
+Our reimplementation of Show, Attend, and Tell successfully reproduced and improved upon the original paper's results, achieving higher METEOR scores and using modern architectural choices like ResNet50, ADAM, and REINFORCE.
+
+
 
 ## References
 
