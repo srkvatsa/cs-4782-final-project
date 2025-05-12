@@ -121,10 +121,16 @@ Our reimplementation of Show, Attend, and Tell successfully reproduced and impro
 
 [15] Wei Zhang and Jing Zhang. "TPCap: Unlocking zero-shot image captioning with trigger-augmented and multi-modal purification modules." arXiv preprint arXiv:2502.11024, 2025.
 
+[16] "Framing Image Description as a Ranking Task: Data, Models and Evaluation Metrics", Journal of Artifical Intellegence Research, Volume 47, pages 853-899 http://www.jair.org/papers/paper3994.html
+
+[17] Hannah Li, Sivaraman K S. "Show, Attend, and Tell Neural Image Caption Generation with Visual Attention". Slides
+
+[18] Halfling Wizard. (2021). "Show, Attend And Tell - Paper Explained." YouTube. https://www.youtube.com/watch?v=y1S3Ri7myMg
+
 ## Acknowledgements
 
 This project was completed as part of the Cornell CS4782: [Introduction to Deep Learning [SP25] course](https://www.cs.cornell.edu/courses/cs4782/2025sp/). We express our gratitude to the professors and course staff for compute allocations, as well as their sustained advising and feedback.
 
-We would also like to thank the authors of the original papers for their groundbreaking work in attention-based image captioning. Special thanks to [3Blue1Brown's video on attention mechanisms](https://www.youtube.com/watch?v=y1S3Ri7myMg) for providing an excellent intuitive explanation of the concept.
+We would also like to thank the authors of the original papers for their groundbreaking work in attention-based image captioning. 
 
-We would like to wish our moms a happy Mother's Day!
+Most importantly, we would like to wish our moms a happy Mother's Day!
