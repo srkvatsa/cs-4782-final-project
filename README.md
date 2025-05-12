@@ -1,6 +1,6 @@
 # Exploring Show, Attend, Tell Attention Mechanisms for Image Captioning
 Nick Brenner, Alex Kozik, Brandon Li, Jake Silver, Srivatsa Kundurthy
-## Introduction
+## Introduction 
 ****
 Image captioning explores the space defined by the intersection of Natural Language Processing (NLP) and Computer Vision (CV). Generating a caption given an image, especially in zero-shot cases, is a difficult task due to the need for semantic alignment between two very different spaces and the inherent subjectivity in what is of importance in an image.
 
