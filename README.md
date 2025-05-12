@@ -77,7 +77,8 @@ After completing training, the visualization section will output where our model
 TODO
 
 ## Conclusion
-TODO
+
+Our reimplementation of Show, Attend, and Tell successfully reproduced and improved unpon the original paper's results, achieving higher METEOR scores and using modern architectural choices like ResNet50, ADAM, and REINFORCE. 
 
 ## References
 
