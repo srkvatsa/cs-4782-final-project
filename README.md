@@ -68,6 +68,8 @@ We implemented an encoder-decoder framework using a ResNet-50 encoder to produce
 
 4. Run each section sequentially to reproduce the results.
 
+We trained on Nvidia T4 GPU for approximately 24 hours to get to 50 epochs and fine-tune for hard attention.
+
 ## Running the Notebook
 
 The notebook `run_sat.ipynb` is organized into 6 main sections:
